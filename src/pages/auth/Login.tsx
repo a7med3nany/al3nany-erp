@@ -1,10 +1,12 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
 import { signInWithEmailAndPassword } from "firebase/auth";
 import { auth } from "../../config/firebase";
 import { Loader2, Lock, Mail } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { useAuthStore } from "../../store/authStore";
 
 // تعريف شروط صحة البيانات (Validation Schema)
 const loginSchema = z.object({
@@ -17,6 +19,16 @@ type LoginFormValues = z.infer<typeof loginSchema>;
 export default function Login() {
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  
+  const navigate = useNavigate();
+  const { user } = useAuthStore();
+
+  // توجيه المستخدم فوراً للوحة التحكم إذا كان مسجلاً للدخول بالفعل
+  useEffect(() => {
+    if (user) {
+      navigate("/", { replace: true });
+    }
+  }, [user, navigate]);
 
   const {
     register,
@@ -32,12 +44,11 @@ export default function Login() {
     try {
       // محاولة تسجيل الدخول عبر فايربيز
       await signInWithEmailAndPassword(auth, data.email, data.password);
-      // في حال النجاح، متجر Zustand سيلتقط التغيير تلقائياً
+      // بمجرد النجاح، ستتغير حالة user في Zustand، وسيعمل useEffect بالأعلى لتوجيه المستخدم
     } catch (err: any) {
       console.error(err);
       setError("بيانات الدخول غير صحيحة. يرجى المحاولة مرة أخرى.");
-    } finally {
-      setIsLoading(false);
+      setIsLoading(false); // نوقف التحميل فقط في حالة الخطأ لكي يحاول مجدداً
     }
   };
 
