@@ -2,7 +2,7 @@ import { Outlet, NavLink } from "react-router-dom";
 import { signOut } from "firebase/auth";
 import { auth } from "../config/firebase";
 import { useAuthStore } from "../store/authStore";
-import { LogOut, User, LayoutDashboard, Store, ShoppingCart, Settings } from "lucide-react";
+import { LogOut, User, LayoutDashboard, Store, Wallet, ShoppingCart, Settings } from "lucide-react";
 
 export default function MainLayout() {
   const { user } = useAuthStore();
@@ -39,6 +39,11 @@ export default function MainLayout() {
           <NavLink to="/warehouses" className={navLinkClass}>
             <Store className="h-5 w-5" />
             <span>المخازن</span>
+          </NavLink>
+
+          <NavLink to="/cashboxes" className={navLinkClass}>
+            <Wallet className="h-5 w-5" />
+            <span>الخزائن والحسابات</span>
           </NavLink>
           
           <NavLink to="/sales" className={navLinkClass}>
