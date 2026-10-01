@@ -16,7 +16,8 @@ const DashboardPlaceholder = () => (
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
+      {/* تم إضافة basename لحل مشكلة المسار الفرعي على GitHub Pages */}
+      <BrowserRouter basename="/al3nany-erp/">
         <Routes>
           {/* الهيكل الأساسي يغلف جميع الصفحات الداخلية */}
           <Route path="/" element={<MainLayout />}>
