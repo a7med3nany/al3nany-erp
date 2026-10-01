@@ -1,15 +1,15 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
-import path from 'path'
+import { fileURLToPath, URL } from 'url'
 
-// https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
-  // إضافة base لحل مشكلة المسار الفرعي على GitHub Pages
-  base: '/al3nany-erp/', 
+  // مسار نسبي ليعمل على GitHub Pages وعلى Cloudflare دون أي تعديلات مستقبلية
+  base: './', 
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src'),
+      // الطريقة الحديثة والآمنة لتعريف المسارات بدلاً من __dirname التي تسبب انهيار النظام
+      '@': fileURLToPath(new URL('./src', import.meta.url))
     },
   },
 })
