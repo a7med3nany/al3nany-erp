@@ -1,8 +1,8 @@
-import { Outlet } from "react-router-dom";
+import { Outlet, NavLink } from "react-router-dom";
 import { signOut } from "firebase/auth";
 import { auth } from "../config/firebase";
 import { useAuthStore } from "../store/authStore";
-import { LogOut, User, LayoutDashboard, Package, ShoppingCart, Settings } from "lucide-react";
+import { LogOut, User, LayoutDashboard, Store, ShoppingCart, Settings } from "lucide-react";
 
 export default function MainLayout() {
   const { user } = useAuthStore();
@@ -15,6 +15,14 @@ export default function MainLayout() {
     }
   };
 
+  // دالة مساعدة لتحديد تنسيق الرابط بناءً على حالته (نشط أم لا)
+  const navLinkClass = ({ isActive }: { isActive: boolean }) =>
+    `flex items-center gap-3 px-3 py-2.5 rounded-md transition-colors font-medium ${
+      isActive
+        ? "bg-primary/10 text-primary"
+        : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+    }`;
+
   return (
     <div className="flex h-screen bg-background overflow-hidden">
       {/* القائمة الجانبية (Sidebar) */}
@@ -22,23 +30,28 @@ export default function MainLayout() {
         <div className="h-16 flex items-center justify-center border-b border-border">
           <h1 className="text-xl font-bold text-primary tracking-tight">Al-3nany ERP</h1>
         </div>
-        <nav className="flex-1 p-4 space-y-1">
-          <a href="#" className="flex items-center gap-3 px-3 py-2.5 bg-primary/10 text-primary rounded-md transition-colors font-medium">
+        <nav className="flex-1 p-4 flex flex-col gap-1">
+          <NavLink to="/" end className={navLinkClass}>
             <LayoutDashboard className="h-5 w-5" />
             <span>لوحة التحكم</span>
-          </a>
-          <a href="#" className="flex items-center gap-3 px-3 py-2.5 text-muted-foreground hover:bg-secondary hover:text-foreground rounded-md transition-colors font-medium">
-            <Package className="h-5 w-5" />
-            <span>المخازن والأصناف</span>
-          </a>
-          <a href="#" className="flex items-center gap-3 px-3 py-2.5 text-muted-foreground hover:bg-secondary hover:text-foreground rounded-md transition-colors font-medium">
+          </NavLink>
+          
+          <NavLink to="/warehouses" className={navLinkClass}>
+            <Store className="h-5 w-5" />
+            <span>المخازن</span>
+          </NavLink>
+          
+          <NavLink to="/sales" className={navLinkClass}>
             <ShoppingCart className="h-5 w-5" />
             <span>المبيعات</span>
-          </a>
-          <a href="#" className="flex items-center gap-3 px-3 py-2.5 text-muted-foreground hover:bg-secondary hover:text-foreground rounded-md transition-colors font-medium mt-auto">
-            <Settings className="h-5 w-5" />
-            <span>الإعدادات</span>
-          </a>
+          </NavLink>
+          
+          <div className="mt-auto">
+            <NavLink to="/settings" className={navLinkClass}>
+              <Settings className="h-5 w-5" />
+              <span>الإعدادات</span>
+            </NavLink>
+          </div>
         </nav>
       </aside>
 
@@ -50,7 +63,7 @@ export default function MainLayout() {
             Al-3nany ERP
           </div>
           
-          {/* قسم المستخدم وزر الخروج متموضع في اليسار (mr-auto للاتجاه العربي) */}
+          {/* قسم المستخدم وزر الخروج متموضع في اليسار */}
           <div className="flex items-center gap-4 mr-auto">
             <div className="hidden sm:flex items-center gap-2 text-sm text-muted-foreground bg-secondary/40 px-3 py-1.5 rounded-md border border-border">
               <User className="h-4 w-4" />
