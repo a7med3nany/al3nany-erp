@@ -9,6 +9,7 @@ import MainLayout from "./layouts/MainLayout";
 import Login from "./pages/auth/Login";
 import ProtectedRoute from "./components/auth/ProtectedRoute";
 import Warehouses from "./pages/master-data/Warehouses";
+import Cashboxes from "./pages/master-data/Cashboxes";
 
 // تهيئة عميل React Query لإدارة استدعاءات البيانات
 const queryClient = new QueryClient();
@@ -49,8 +50,9 @@ function App() {
               
               {/* شاشات البيانات الأساسية (Master Data) */}
               <Route path="warehouses" element={<Warehouses />} />
+              <Route path="cashboxes" element={<Cashboxes />} />
               
-              {/* سيتم إضافة شاشات (الخزائن، الأصناف، الفواتير) هنا تباعاً */}
+              {/* سيتم إضافة شاشات (الأصناف، الفواتير) هنا تباعاً */}
             </Route>
           </Route>
 
