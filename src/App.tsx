@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { HashRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import MainLayout from "./layouts/MainLayout";
 
@@ -16,8 +16,8 @@ const DashboardPlaceholder = () => (
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      {/* تم إضافة basename لحل مشكلة المسار الفرعي على GitHub Pages */}
-      <BrowserRouter basename="/al3nany-erp/">
+      {/* تم استخدام HashRouter ليعمل التطبيق كملف Zip على أي استضافة دون مشاكل */}
+      <HashRouter>
         <Routes>
           {/* الهيكل الأساسي يغلف جميع الصفحات الداخلية */}
           <Route path="/" element={<MainLayout />}>
@@ -25,7 +25,7 @@ function App() {
             {/* سيتم إضافة مسارات المبيعات، المخازن، وغيرها هنا لاحقاً */}
           </Route>
         </Routes>
-      </BrowserRouter>
+      </HashRouter>
     </QueryClientProvider>
   );
 }
