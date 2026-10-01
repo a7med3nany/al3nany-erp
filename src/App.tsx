@@ -8,6 +8,7 @@ import { useAuthStore } from "./store/authStore";
 import MainLayout from "./layouts/MainLayout";
 import Login from "./pages/auth/Login";
 import ProtectedRoute from "./components/auth/ProtectedRoute";
+import Warehouses from "./pages/master-data/Warehouses";
 
 // تهيئة عميل React Query لإدارة استدعاءات البيانات
 const queryClient = new QueryClient();
@@ -45,7 +46,11 @@ function App() {
           <Route element={<ProtectedRoute />}>
             <Route path="/" element={<MainLayout />}>
               <Route index element={<DashboardPlaceholder />} />
-              {/* سيتم إضافة شاشات (المخازن، الخزائن، الأصناف) هنا تباعاً */}
+              
+              {/* شاشات البيانات الأساسية (Master Data) */}
+              <Route path="warehouses" element={<Warehouses />} />
+              
+              {/* سيتم إضافة شاشات (الخزائن، الأصناف، الفواتير) هنا تباعاً */}
             </Route>
           </Route>
 
