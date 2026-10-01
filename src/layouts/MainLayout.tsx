@@ -1,43 +1,77 @@
 import { Outlet } from "react-router-dom";
+import { signOut } from "firebase/auth";
+import { auth } from "../config/firebase";
+import { useAuthStore } from "../store/authStore";
+import { LogOut, User, LayoutDashboard, Package, ShoppingCart, Settings } from "lucide-react";
 
 export default function MainLayout() {
+  const { user } = useAuthStore();
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+    } catch (error) {
+      console.error("Logout Error:", error);
+    }
+  };
+
   return (
-    <div className="flex h-screen w-full overflow-hidden bg-background">
-      {/* القائمة الجانبية (Sidebar) - تظهر على يمين الشاشة في وضع RTL */}
-      <aside className="hidden md:flex flex-col w-64 border-l border-border bg-card text-card-foreground shrink-0">
-        <div className="h-16 flex items-center justify-center border-b border-border px-4">
-          <h1 className="text-xl font-bold text-primary">العناني ERP</h1>
+    <div className="flex h-screen bg-background overflow-hidden">
+      {/* القائمة الجانبية (Sidebar) */}
+      <aside className="w-64 bg-card border-l border-border hidden md:flex flex-col z-20 shadow-sm">
+        <div className="h-16 flex items-center justify-center border-b border-border">
+          <h1 className="text-xl font-bold text-primary tracking-tight">Al-3nany ERP</h1>
         </div>
-        
-        <nav className="flex-1 overflow-y-auto p-4">
-          {/* سيتم إضافة روابط التنقل هنا في المراحل القادمة */}
-          <p className="text-sm text-muted-foreground text-center mt-10">
-            جاري بناء النظام...
-          </p>
+        <nav className="flex-1 p-4 space-y-1">
+          <a href="#" className="flex items-center gap-3 px-3 py-2.5 bg-primary/10 text-primary rounded-md transition-colors font-medium">
+            <LayoutDashboard className="h-5 w-5" />
+            <span>لوحة التحكم</span>
+          </a>
+          <a href="#" className="flex items-center gap-3 px-3 py-2.5 text-muted-foreground hover:bg-secondary hover:text-foreground rounded-md transition-colors font-medium">
+            <Package className="h-5 w-5" />
+            <span>المخازن والأصناف</span>
+          </a>
+          <a href="#" className="flex items-center gap-3 px-3 py-2.5 text-muted-foreground hover:bg-secondary hover:text-foreground rounded-md transition-colors font-medium">
+            <ShoppingCart className="h-5 w-5" />
+            <span>المبيعات</span>
+          </a>
+          <a href="#" className="flex items-center gap-3 px-3 py-2.5 text-muted-foreground hover:bg-secondary hover:text-foreground rounded-md transition-colors font-medium mt-auto">
+            <Settings className="h-5 w-5" />
+            <span>الإعدادات</span>
+          </a>
         </nav>
       </aside>
 
-      {/* منطقة المحتوى الرئيسي (Main Content Area) */}
-      <main className="flex-1 flex flex-col h-screen overflow-hidden relative">
+      {/* المحتوى الرئيسي */}
+      <div className="flex-1 flex flex-col h-screen overflow-hidden">
         {/* الشريط العلوي (Topbar) */}
-        <header className="h-16 flex items-center justify-between border-b border-border bg-card px-6 shrink-0">
-          <div className="text-lg font-semibold text-foreground">
-            {/* سيتم ربط عنوان الصفحة ديناميكياً لاحقاً */}
-            الرئيسية
+        <header className="h-16 bg-card border-b border-border flex items-center justify-between px-4 sm:px-6 z-10 shadow-sm">
+          <div className="md:hidden font-bold text-primary text-lg">
+            Al-3nany ERP
           </div>
-          <div className="flex items-center gap-4">
-            {/* مكان لزر الملف الشخصي وتسجيل الخروج لاحقاً */}
-            <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center text-primary text-sm font-bold">
-              أ
+          
+          {/* قسم المستخدم وزر الخروج متموضع في اليسار (mr-auto للاتجاه العربي) */}
+          <div className="flex items-center gap-4 mr-auto">
+            <div className="hidden sm:flex items-center gap-2 text-sm text-muted-foreground bg-secondary/40 px-3 py-1.5 rounded-md border border-border">
+              <User className="h-4 w-4" />
+              <span className="truncate max-w-[180px] font-medium">{user?.email || 'مستخدم النظام'}</span>
             </div>
+            <button
+              onClick={handleLogout}
+              className="flex items-center gap-2 text-sm text-red-600 hover:text-red-700 bg-red-50 hover:bg-red-100 border border-red-100 px-4 py-1.5 rounded-md transition-colors font-semibold"
+              title="تسجيل الخروج"
+            >
+              <LogOut className="h-4 w-4" />
+              <span>خروج</span>
+            </button>
           </div>
         </header>
 
-        {/* مساحة عرض محتوى الصفحات الداخلية */}
-        <div className="flex-1 overflow-y-auto p-6">
+        {/* منطقة عرض الصفحات (Outlet) */}
+        <main className="flex-1 overflow-auto p-4 sm:p-6 bg-slate-50/50 dark:bg-background/90">
           <Outlet />
-        </div>
-      </main>
+        </main>
+      </div>
     </div>
   );
 }
