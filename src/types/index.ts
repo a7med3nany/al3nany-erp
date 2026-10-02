@@ -37,7 +37,6 @@ export interface Cashbox extends BaseEntity {
 // 3. الحركات المالية للخزائن (Financial Transactions - Cash Ledger)
 // ----------------------------------------------------------------------
 // ملاحظة معمارية: هذا السجل هو Source of Truth للنقدية والخزائن فقط. 
-// حركات المخزون سيكون لها سجل مستقل (inventory_movements).
 // يمنع التعديل المباشر على أي حركة بعد إنشائها. التصحيح يتم فقط عبر إنشاء حركة عكسية (Reverse).
 
 export type TransactionFlow = 'in' | 'out';
@@ -52,7 +51,7 @@ export type TransactionType =
   | 'expense'           // مصروفات
   | 'sales_return'      // مرتجع مبيعات (خروج نقدية)
   | 'purchase_return'   // مرتجع مشتريات (دخول نقدية)
-  | 'reverse';          // حركة عكسية (لتصحيح خطأ سابق)
+  | 'reverse';          // حركة عكسية (لتصحيح خطأ سابق سواء كان حركة فردية أو تحويل)
 
 export type ReferenceType = 
   | 'manual'            // حركة يدوية
@@ -67,8 +66,8 @@ export type ReferenceType =
   | 'correction';       // تسوية أو تصحيح
 
 export type TransactionStatus = 
-  | 'active'            // حركة سارية ومؤثرة على الرصيد
-  | 'reversed';         // حركة تم عكس أثرها المالي وإبطالها بحركة تصحيحية
+  | 'active'            // حركة سارية ومؤثرة على الرصيد (وتشمل الحركات العكسية reverse نفسها)
+  | 'reversed';         // حركة تم عكس أثرها المالي وإبطالها بحركة تصحيحية (لا تدخل في إجماليات الداخل/الخارج)
 
 export interface FinancialTransaction extends BaseEntity {
   cashboxId: string;             // معرف الخزينة التي تمت عليها الحركة
@@ -78,15 +77,18 @@ export interface FinancialTransaction extends BaseEntity {
   balanceAfter: number;          // الرصيد بعد الحركة (للعرض السريع في كشف الحساب - لا يُعدل يدوياً)
   
   referenceType: ReferenceType;  // نوع المستند الأصلي
-  referenceId?: string;          // معرف المستند الأصلي (اختياري، فالحركات اليدوية قد لا تملك مستنداً منفصلاً)
+  referenceId?: string;          // معرف المستند الأصلي (في الحركة العكسية 'reverse' يكون هو ID الحركة الأصلية التي تم عكسها)
   
-  transferId?: string;           // معرف التحويل (يستخدم لربط حركتي transfer_out و transfer_in معاً)
+  transferId?: string;           // معرف التحويل (يُربط به حركتي transfer_out و transfer_in، وأيضاً حركتي العكس الخاصة بهما)
+  
+  // حقول خاصة بالتحويلات (لتوثيق الخزينة المقابلة بدقة دون الاعتماد على الوصف)
+  counterpartCashboxId?: string; // معرف الخزينة الطرف الآخر
+  counterpartCashboxName?: string; // اسم الخزينة الطرف الآخر (وقت تنفيذ الحركة)
   
   description: string;           // البيان / الوصف (إجباري لتوثيق سبب الحركة)
   
   status: TransactionStatus;     // حالة الحركة (فعالة أو تم عكسها)
-  reversedByTransactionId?: string; // في حال تم إلغاء الحركة، يكتب هنا ID الحركة العكسية (للتدقيق Audit)
+  reversedByTransactionId?: string; // في حال تم إلغاء الحركة، يُكتب هنا ID الحركة العكسية (للتدقيق Audit Trail)
   
   createdBy: string;             // معرف المستخدم الذي قام بالحركة (لتتبع المسؤولية)
-  // حقل createdAt موروث من BaseEntity ويوثق تاريخ ووقت الحركة
 }
