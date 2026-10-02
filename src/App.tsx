@@ -20,7 +20,7 @@ const queryClient = new QueryClient();
 // مكون مؤقت للصفحة الرئيسية
 const DashboardPlaceholder = () => (
   <div className="flex flex-col items-center justify-center h-full text-muted-foreground animate-in fade-in duration-500">
-    <h2 className="text-2xl font-bold mb-2 text-foreground">مرحباً بك في نظام عروج ERP</h2>
+    <h2 className="text-2xl font-bold mb-2 text-foreground font-mono tracking-wider">مرحباً بك في نظام EL3NANY ERP</h2>
     <p>لقد قمت بتسجيل الدخول بنجاح وأنت الآن داخل المنطقة المحمية.</p>
   </div>
 );
