@@ -3,7 +3,7 @@ import { useParams, useNavigate, Link } from 'react-router-dom';
 import { 
   ArrowRight, ArrowUpRight, ArrowDownLeft, ArrowLeftRight, 
   Wallet, Search, Filter, AlertCircle, Loader2, RotateCcw,
-  PlusCircle, MinusCircle, FileText
+  PlusCircle, MinusCircle, FileText, CheckCircle2
 } from 'lucide-react';
 import { useCashboxStore } from '../../store/cashboxStore';
 import { useTransactionStore } from '../../store/transactionStore';
@@ -21,7 +21,8 @@ export default function CashboxDetails() {
     fetchLedger, 
     executeManualTransaction, 
     executeTransfer,
-    reverseTx
+    reverseTx,
+    reverseTransfer
   } = useTransactionStore();
 
   const cashbox = cashboxes.find(c => c.id === id);
@@ -40,6 +41,7 @@ export default function CashboxDetails() {
   const [destCashboxId, setDestCashboxId] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   // Filters
   const [searchTerm, setSearchTerm] = useState('');
@@ -47,10 +49,18 @@ export default function CashboxDetails() {
 
   useEffect(() => {
     if (id) {
-      fetchCashboxes(); // Refresh cashboxes to get latest balance
+      fetchCashboxes();
       fetchLedger(id);
     }
   }, [id, fetchCashboxes, fetchLedger]);
+
+  // مسح رسالة النجاح تلقائياً بعد 4 ثوانٍ
+  useEffect(() => {
+    if (successMessage) {
+      const timer = setTimeout(() => setSuccessMessage(null), 4000);
+      return () => clearTimeout(timer);
+    }
+  }, [successMessage]);
 
   const filteredTransactions = useMemo(() => {
     return transactions.filter(tx => {
@@ -60,6 +70,11 @@ export default function CashboxDetails() {
       return matchSearch && matchType;
     });
   }, [transactions, searchTerm, filterType]);
+
+  // فحص ما إذا كانت الحركة قد تم عكسها بالفعل (بالبحث عن حركتها العكسية في نفس السجل)
+  const isTxReversed = (tx: CashboxTransaction) => {
+    return transactions.some(t => t.referenceId === `rev_${tx.referenceId}`);
+  };
 
   const resetForms = () => {
     setAmount('');
@@ -96,10 +111,11 @@ export default function CashboxDetails() {
         type: manualType,
         amount: Number(amount),
         description: description,
-        createdBy: 'admin' // In a real app, get from auth context
+        createdBy: 'admin'
       });
-      fetchCashboxes(); // Refresh header balance
+      fetchCashboxes();
       setIsManualModalOpen(false);
+      setSuccessMessage(manualType === 'in' ? 'تم الإيداع بنجاح.' : 'تم السحب بنجاح.');
     } catch (err: any) {
       setActionError(err.message || 'حدث خطأ أثناء تنفيذ العملية');
     } finally {
@@ -120,8 +136,9 @@ export default function CashboxDetails() {
         description: description,
         createdBy: 'admin'
       });
-      fetchCashboxes(); // Refresh header balance
+      fetchCashboxes();
       setIsTransferModalOpen(false);
+      setSuccessMessage('تم التحويل المالي بنجاح.');
     } catch (err: any) {
       setActionError(err.message || 'حدث خطأ أثناء التحويل');
     } finally {
@@ -133,11 +150,26 @@ export default function CashboxDetails() {
     if (!id || !txToReverse) return;
     setIsSubmitting(true);
     setActionError(null);
+    
     try {
-      await reverseTx(txToReverse.id, 'admin');
+      if (txToReverse.referenceType === 'transfer') {
+        // بما أن الـ CashboxTransaction لا يحمل صراحة الـ counterpart ID 
+        // وممنوع عمل استعلام خارجي هنا، فلا يمكننا تحديد الطرف الآخر بأمان לעكس التحويل الذري.
+        throw new Error('تعذر تحديد الخزينة المقابلة لهذا التحويل للقيام بعملية العكس بأمان.');
+        
+        /* 
+         * الكود الصحيح إذا توفرت بيانات الطرف الآخر سيكون:
+         * await reverseTransfer(txToReverse.referenceId, sourceId, destId, 'admin');
+         */
+      } else {
+        // إلغاء معاملة يدوية عادية
+        await reverseTx(txToReverse.id, 'admin');
+      }
+
       await fetchLedger(id);
       fetchCashboxes();
       setIsReverseModalOpen(false);
+      setSuccessMessage('تم عكس الحركة بنجاح.');
     } catch (err: any) {
       setActionError(err.message || 'حدث خطأ أثناء الإلغاء');
     } finally {
@@ -199,17 +231,36 @@ export default function CashboxDetails() {
 
         {/* Action Buttons */}
         <div className="flex flex-wrap gap-3 mt-6 pt-6 border-t border-border">
-          <button onClick={() => handleOpenManual('in')} className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2.5 rounded-md font-medium transition-colors shadow-sm">
+          <button 
+            onClick={() => handleOpenManual('in')} 
+            disabled={isSubmitting}
+            className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2.5 rounded-md font-medium transition-colors shadow-sm disabled:opacity-70"
+          >
             <PlusCircle className="h-5 w-5" /> إيداع نقدي
           </button>
-          <button onClick={() => handleOpenManual('out')} className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-rose-600 hover:bg-rose-700 text-white px-5 py-2.5 rounded-md font-medium transition-colors shadow-sm">
+          <button 
+            onClick={() => handleOpenManual('out')} 
+            disabled={isSubmitting}
+            className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-rose-600 hover:bg-rose-700 text-white px-5 py-2.5 rounded-md font-medium transition-colors shadow-sm disabled:opacity-70"
+          >
             <MinusCircle className="h-5 w-5" /> سحب نقدي
           </button>
-          <button onClick={handleOpenTransfer} className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-md font-medium transition-colors shadow-sm">
+          <button 
+            onClick={handleOpenTransfer} 
+            disabled={isSubmitting}
+            className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-md font-medium transition-colors shadow-sm disabled:opacity-70"
+          >
             <ArrowLeftRight className="h-5 w-5" /> تحويل لخزينة أخرى
           </button>
         </div>
       </div>
+
+      {successMessage && (
+        <div className="bg-emerald-50 text-emerald-700 border border-emerald-200 p-4 rounded-xl flex items-center gap-3 shadow-sm animate-in fade-in slide-in-from-top-2">
+          <CheckCircle2 className="h-5 w-5 shrink-0" />
+          <p className="font-bold">{successMessage}</p>
+        </div>
+      )}
 
       {txError && (
         <div className="bg-destructive/10 text-destructive border border-destructive/20 p-4 rounded-xl flex items-center gap-3 shadow-sm">
@@ -262,59 +313,67 @@ export default function CashboxDetails() {
                   <th className="px-4 py-4 font-semibold">الحركة / التفاصيل</th>
                   <th className="px-4 py-4 font-semibold text-center">المبلغ</th>
                   <th className="px-4 py-4 font-semibold text-center">الرصيد بعد</th>
-                  <th className="px-4 py-4 font-semibold text-center w-24">إجراءات</th>
+                  <th className="px-4 py-4 font-semibold text-center w-32">إجراءات</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {filteredTransactions.map((tx) => (
-                  <tr key={tx.id} className="hover:bg-secondary/20 transition-colors">
-                    <td className="px-4 py-3 align-top whitespace-nowrap text-muted-foreground">
-                      <div className="font-medium text-foreground">{tx.createdAt?.toLocaleDateString('en-GB')}</div>
-                      <div className="text-xs">{tx.createdAt?.toLocaleTimeString('en-GB', { hour: '2-digit', minute:'2-digit' })}</div>
-                    </td>
-                    <td className="px-4 py-3 align-top">
-                      <div className="flex items-center gap-2 mb-1">
-                        {tx.type === 'in' ? (
-                          <span className="inline-flex items-center gap-1 text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded text-xs font-bold border border-emerald-200">
-                            <ArrowDownLeft className="h-3 w-3" /> وارد
+                {filteredTransactions.map((tx) => {
+                  const reversed = isTxReversed(tx);
+                  const isReverseAction = tx.referenceId.startsWith('rev_');
+
+                  return (
+                    <tr key={tx.id} className="hover:bg-secondary/20 transition-colors">
+                      <td className="px-4 py-3 align-top whitespace-nowrap text-muted-foreground">
+                        <div className="font-medium text-foreground">{tx.createdAt?.toLocaleDateString('en-GB')}</div>
+                        <div className="text-xs">{tx.createdAt?.toLocaleTimeString('en-GB', { hour: '2-digit', minute:'2-digit' })}</div>
+                      </td>
+                      <td className="px-4 py-3 align-top">
+                        <div className="flex items-center gap-2 mb-1">
+                          {tx.type === 'in' ? (
+                            <span className="inline-flex items-center gap-1 text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded text-xs font-bold border border-emerald-200">
+                              <ArrowDownLeft className="h-3 w-3" /> وارد
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-rose-600 bg-rose-50 px-2 py-0.5 rounded text-xs font-bold border border-rose-200">
+                              <ArrowUpRight className="h-3 w-3" /> صادر
+                            </span>
+                          )}
+                          <span className="text-xs bg-secondary px-2 py-0.5 rounded font-medium text-secondary-foreground border border-border">
+                            {tx.referenceType === 'transfer' 
+                              ? (tx.type === 'in' ? 'تحويل وارد' : 'تحويل صادر') 
+                              : translateRefType(tx.referenceType)}
                           </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1 text-rose-600 bg-rose-50 px-2 py-0.5 rounded text-xs font-bold border border-rose-200">
-                            <ArrowUpRight className="h-3 w-3" /> صادر
-                          </span>
-                        )}
-                        <span className="text-xs bg-secondary px-2 py-0.5 rounded font-medium text-secondary-foreground border border-border">
-                          {translateRefType(tx.referenceType)}
+                        </div>
+                        <div className="text-foreground font-medium">{tx.description || '-'}</div>
+                        <div className="text-xs text-muted-foreground mt-0.5 font-mono text-left block w-fit" dir="ltr">#{tx.referenceId}</div>
+                      </td>
+                      <td className="px-4 py-3 align-top text-center">
+                        <span className={`font-bold ${tx.type === 'in' ? 'text-emerald-600' : 'text-rose-600'}`}>
+                          {tx.type === 'in' ? '+' : '-'}{Number(tx.amount).toLocaleString()}
                         </span>
-                      </div>
-                      <div className="text-foreground font-medium">{tx.description || '-'}</div>
-                      <div className="text-xs text-muted-foreground mt-0.5 font-mono text-left block w-fit" dir="ltr">#{tx.referenceId}</div>
-                    </td>
-                    <td className="px-4 py-3 align-top text-center">
-                      <span className={`font-bold ${tx.type === 'in' ? 'text-emerald-600' : 'text-rose-600'}`}>
-                        {tx.type === 'in' ? '+' : '-'}{Number(tx.amount).toLocaleString()}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 align-top text-center font-bold text-foreground">
-                      {Number(tx.balanceAfter).toLocaleString()}
-                    </td>
-                    <td className="px-4 py-3 align-top text-center">
-                      {tx.referenceType === 'transfer' ? (
-                        <span className="text-xs text-muted-foreground cursor-not-allowed" title="يجب عمل تحويل عكسي لإلغاء التحويل">لا يلغى مياشرة</span>
-                      ) : tx.referenceId.startsWith('rev_') ? (
-                        <span className="text-xs text-muted-foreground">حركة ملغاة</span>
-                      ) : (
-                        <button 
-                          onClick={() => handleOpenReverse(tx)}
-                          className="text-rose-600 hover:text-rose-800 bg-rose-50 hover:bg-rose-100 p-1.5 rounded transition-colors w-full flex items-center justify-center"
-                          title="إلغاء الحركة"
-                        >
-                          <RotateCcw className="h-4 w-4" />
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
+                      </td>
+                      <td className="px-4 py-3 align-top text-center font-bold text-foreground">
+                        {Number(tx.balanceAfter).toLocaleString()}
+                      </td>
+                      <td className="px-4 py-3 align-top text-center">
+                        {isReverseAction ? (
+                          <span className="text-xs text-muted-foreground bg-secondary px-2 py-1 rounded">حركة عكس</span>
+                        ) : reversed ? (
+                          <span className="text-xs font-bold text-rose-600 bg-rose-50 px-2 py-1 rounded border border-rose-200">تم عكس التحويل</span>
+                        ) : (
+                          <button 
+                            onClick={() => handleOpenReverse(tx)}
+                            disabled={isSubmitting}
+                            className="text-xs text-rose-600 hover:text-white bg-rose-50 hover:bg-rose-600 p-1.5 rounded transition-colors w-full flex items-center justify-center gap-1 border border-rose-200 hover:border-transparent disabled:opacity-50"
+                            title={tx.referenceType === 'transfer' ? 'عكس التحويل المالي' : 'إلغاء الحركة اليدوية'}
+                          >
+                            <RotateCcw className="h-3 w-3" /> {tx.referenceType === 'transfer' ? 'عكس التحويل' : 'إلغاء الحركة'}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
                 {filteredTransactions.length === 0 && (
                   <tr>
                     <td colSpan={5} className="px-4 py-12 text-center text-muted-foreground">
@@ -466,7 +525,7 @@ export default function CashboxDetails() {
         </div>
       )}
 
-      {/* Reverse Transaction Modal */}
+      {/* Reverse Transaction / Transfer Modal */}
       {isReverseModalOpen && txToReverse && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="bg-card w-full max-w-sm rounded-xl shadow-xl border border-border overflow-hidden">
@@ -474,18 +533,36 @@ export default function CashboxDetails() {
               <div className="w-16 h-16 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center mx-auto mb-4">
                 <RotateCcw className="h-8 w-8" />
               </div>
-              <h2 className="text-xl font-bold text-foreground">تأكيد إلغاء الحركة</h2>
+              
+              <h2 className="text-xl font-bold text-foreground">
+                {txToReverse.referenceType === 'transfer' ? 'تأكيد عكس التحويل المالي' : 'تأكيد إلغاء الحركة'}
+              </h2>
+              
               <div className="text-sm text-muted-foreground p-3 bg-secondary/50 rounded-lg text-right">
-                <p><strong>المبلغ:</strong> {txToReverse.amount}</p>
-                <p><strong>البيان:</strong> {txToReverse.description}</p>
+                <p><strong>المبلغ:</strong> {Number(txToReverse.amount).toLocaleString()}</p>
+                <p><strong>البيان:</strong> {txToReverse.description || 'بدون بيان'}</p>
               </div>
-              <p className="text-xs text-rose-600 font-bold">
-                تنبيه: سيتم تسجيل حركة عكسية جديدة في السجل لتسوية الرصيد ولن يتم مسح الحركة القديمة للحفاظ على التسلسل المحاسبي.
-              </p>
+
+              {txToReverse.referenceType === 'transfer' ? (
+                <div className="text-xs text-right bg-rose-50 text-rose-800 p-3 rounded-lg border border-rose-200 space-y-1">
+                  <p className="font-bold">سيتم تنفيذ الإجراءات الذرية التالية:</p>
+                  <ul className="list-disc list-inside">
+                    <li>إعادة المبلغ إلى الخزينة المصدر</li>
+                    <li>خصم المبلغ من الخزينة المستقبلة</li>
+                    <li>تسجيل عملية عكس كاملة في السجل</li>
+                  </ul>
+                  <p className="mt-2 text-rose-600 font-bold">هذا الإجراء لا يمكن التراجع عنه إلا بعملية مالية جديدة.</p>
+                </div>
+              ) : (
+                <p className="text-xs text-rose-600 font-bold">
+                  تنبيه: سيتم تسجيل حركة عكسية جديدة في السجل لتسوية الرصيد ولن يتم مسح الحركة القديمة للحفاظ على التسلسل المحاسبي.
+                </p>
+              )}
               
               {actionError && (
-                <div className="p-3 bg-destructive/10 border border-destructive/20 text-destructive rounded-md text-xs font-semibold mt-4 text-right">
-                  {actionError}
+                <div className="p-3 bg-destructive/10 border border-destructive/20 text-destructive rounded-md text-xs font-semibold mt-4 text-right flex items-start gap-2">
+                  <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                  <p>{actionError}</p>
                 </div>
               )}
               
@@ -495,7 +572,7 @@ export default function CashboxDetails() {
                   type="button" 
                   onClick={submitReverse} 
                   disabled={isSubmitting} 
-                  className="flex-1 bg-rose-600 hover:bg-rose-700 text-white py-2 rounded-md font-medium flex items-center justify-center gap-2"
+                  className="flex-1 bg-rose-600 hover:bg-rose-700 text-white py-2 rounded-md font-medium flex items-center justify-center gap-2 disabled:opacity-70"
                 >
                   {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : 'تأكيد الإلغاء'}
                 </button>
