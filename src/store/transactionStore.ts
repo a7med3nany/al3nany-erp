@@ -1,15 +1,18 @@
 import { create } from 'zustand';
+import { doc, collection } from 'firebase/firestore';
+import { db } from '../config/firebase';
 import { 
   processManualTransaction, 
   processTransfer, 
   getCashboxLedger,
-  reverseTransaction
+  reverseTransaction,
+  reverseTransfer as reverseTransferService
 } from '../services/transactionService';
 import { CashboxTransaction, TransactionType } from '../types';
 
 export interface ManualTransactionPayload {
   cashboxId: string;
-  type: TransactionType; // 'in' | 'out' strictly
+  type: TransactionType;
   amount: number;
   description?: string;
   createdBy: string;
@@ -31,6 +34,12 @@ interface TransactionStore {
   executeManualTransaction: (payload: ManualTransactionPayload) => Promise<void>;
   executeTransfer: (payload: TransferPayload) => Promise<void>;
   reverseTx: (transactionId: string, createdBy: string) => Promise<void>;
+  reverseTransfer: (
+    transferId: string, 
+    sourceCashboxId: string, 
+    destCashboxId: string, 
+    createdBy: string
+  ) => Promise<void>;
   clearTransactions: () => void;
 }
 
@@ -45,7 +54,11 @@ export const useTransactionStore = create<TransactionStore>((set, get) => ({
       const data = await getCashboxLedger(cashboxId);
       set({ transactions: data, isLoading: false });
     } catch (error: any) {
-      set({ error: error.message, isLoading: false, transactions: [] });
+      set({ 
+        error: error.message || 'حدث خطأ غير متوقع أثناء جلب سجل الخزينة', 
+        isLoading: false, 
+        transactions: [] 
+      });
     }
   },
 
@@ -71,7 +84,10 @@ export const useTransactionStore = create<TransactionStore>((set, get) => ({
 
       await get().fetchLedger(payload.cashboxId);
     } catch (error: any) {
-      set({ error: error.message, isLoading: false });
+      set({ 
+        error: error.message || 'حدث خطأ غير متوقع', 
+        isLoading: false 
+      });
       throw error;
     } finally {
       set({ isLoading: false });
@@ -85,21 +101,33 @@ export const useTransactionStore = create<TransactionStore>((set, get) => ({
         throw new Error("بيانات الخزينة المصدر أو المستقبل مفقودة");
       }
 
+      if (payload.sourceCashboxId === payload.destCashboxId) {
+        throw new Error("لا يمكن التحويل لنفس الخزينة");
+      }
+
       if (!Number.isFinite(payload.amount) || payload.amount <= 0) {
         throw new Error("يجب إدخال مبلغ صحيح للتحويل");
       }
+
+      // إنشاء معرّف ثابت مرة واحدة للعملية لتفعيل حماية Idempotency في الـ Service
+      const transferId = doc(collection(db, 'cashbox_transactions')).id;
 
       await processTransfer({
         sourceCashboxId: payload.sourceCashboxId,
         destCashboxId: payload.destCashboxId,
         amount: payload.amount,
         description: payload.description || '',
-        createdBy: payload.createdBy
+        createdBy: payload.createdBy,
+        transferId
       });
 
+      // إعادة تحميل سجل الخزينة المصدر فقط لتحديث الواجهة
       await get().fetchLedger(payload.sourceCashboxId);
     } catch (error: any) {
-      set({ error: error.message, isLoading: false });
+      set({ 
+        error: error.message || 'حدث خطأ غير متوقع', 
+        isLoading: false 
+      });
       throw error;
     } finally {
       set({ isLoading: false });
@@ -110,15 +138,50 @@ export const useTransactionStore = create<TransactionStore>((set, get) => ({
     set({ isLoading: true, error: null });
     try {
       await reverseTransaction(transactionId, createdBy);
-      // ملاحظة: لا نستدعي fetchLedger هنا مباشرة لأننا لا نملك cashboxId في سياق هذه الدالة، 
-      // يجب على الواجهة (UI) استدعاء fetchLedger بعد نجاح الإلغاء.
+      // ملاحظة: لا نستدعي fetchLedger هنا لأننا لا نخمن الـ cashboxId
+      // يتم الاعتماد على الواجهة لإعادة تحميل البيانات إذا لزم الأمر
     } catch (error: any) {
-      set({ error: error.message, isLoading: false });
+      set({ 
+        error: error.message || 'حدث خطأ غير متوقع أثناء إلغاء المعاملة', 
+        isLoading: false 
+      });
       throw error;
     } finally {
       set({ isLoading: false });
     }
   },
 
-  clearTransactions: () => set({ transactions: [], error: null })
+  reverseTransfer: async (
+    transferId: string, 
+    sourceCashboxId: string, 
+    destCashboxId: string, 
+    createdBy: string
+  ) => {
+    set({ isLoading: true, error: null });
+    try {
+      await reverseTransferService(
+        transferId,
+        sourceCashboxId,
+        destCashboxId,
+        createdBy
+      );
+
+      // إعادة تحميل سجل الخزينة المصدر لتحديث الواجهة
+      await get().fetchLedger(sourceCashboxId);
+    } catch (error: any) {
+      set({ 
+        error: error.message || 'فشل في عكس التحويل', 
+        isLoading: false 
+      });
+      throw error;
+    } finally {
+      set({ isLoading: false });
+    }
+  },
+
+  clearTransactions: () => set({ 
+    transactions: [], 
+    error: null,
+    isLoading: false
+  })
 }));
