@@ -11,6 +11,7 @@ import ProtectedRoute from "./components/auth/ProtectedRoute";
 import Warehouses from "./pages/master-data/Warehouses";
 import Cashboxes from "./pages/master-data/Cashboxes";
 import CashboxDetails from "./pages/master-data/CashboxDetails";
+import Categories from "./pages/master-data/Categories";
 
 // تهيئة عميل React Query لإدارة استدعاءات البيانات
 const queryClient = new QueryClient();
@@ -18,7 +19,7 @@ const queryClient = new QueryClient();
 // مكون مؤقت للصفحة الرئيسية
 const DashboardPlaceholder = () => (
   <div className="flex flex-col items-center justify-center h-full text-muted-foreground animate-in fade-in duration-500">
-    <h2 className="text-2xl font-bold mb-2 text-foreground">مرحباً بك في نظام العناني ERP</h2>
+    <h2 className="text-2xl font-bold mb-2 text-foreground">مرحباً بك في نظام عروج ERP</h2>
     <p>لقد قمت بتسجيل الدخول بنجاح وأنت الآن داخل المنطقة المحمية.</p>
   </div>
 );
@@ -51,7 +52,7 @@ function App() {
               
               {/* شاشات البيانات الأساسية (Master Data) */}
               <Route path="warehouses" element={<Warehouses />} />
-              
+              <Route path="categories" element={<Categories />} />
               <Route path="cashboxes" element={<Cashboxes />} />
               <Route path="cashboxes/:id" element={<CashboxDetails />} />
               
