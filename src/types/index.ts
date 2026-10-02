@@ -19,7 +19,6 @@ export interface Warehouse extends BaseEntity {
 // ----------------------------------------------------------------------
 // 2. إدارة الخزائن (Cashboxes / Treasuries)
 // ----------------------------------------------------------------------
-
 export type CashboxType = 'cash' | 'bank' | 'wallet' | 'digital';
 
 export interface Cashbox extends BaseEntity {
@@ -36,59 +35,168 @@ export interface Cashbox extends BaseEntity {
 // ----------------------------------------------------------------------
 // 3. الحركات المالية للخزائن (Financial Transactions - Cash Ledger)
 // ----------------------------------------------------------------------
-// ملاحظة معمارية: هذا السجل هو Source of Truth للنقدية والخزائن فقط. 
-// يمنع التعديل المباشر على أي حركة بعد إنشائها. التصحيح يتم فقط عبر إنشاء حركة عكسية (Reverse).
-
 export type TransactionFlow = 'in' | 'out';
 
 export type TransactionType = 
-  | 'deposit'           // إيداع يدوي
-  | 'withdraw'          // سحب يدوي
-  | 'transfer_in'       // تحويل وارد (من خزينة أخرى)
-  | 'transfer_out'      // تحويل صادر (إلى خزينة أخرى)
-  | 'customer_receipt'  // قبض من عميل
-  | 'supplier_payment'  // دفع لمورد
-  | 'expense'           // مصروفات
-  | 'sales_return'      // مرتجع مبيعات (خروج نقدية)
-  | 'purchase_return'   // مرتجع مشتريات (دخول نقدية)
-  | 'reverse';          // حركة عكسية (لتصحيح خطأ سابق سواء كان حركة فردية أو تحويل)
+  | 'deposit'           
+  | 'withdraw'          
+  | 'transfer_in'       
+  | 'transfer_out'      
+  | 'customer_receipt'  
+  | 'supplier_payment'  
+  | 'expense'           
+  | 'sales_return'      
+  | 'purchase_return'   
+  | 'reverse';          
 
+// تحديث ReferenceType ليشمل الحركات المخزنية أيضاً
 export type ReferenceType = 
-  | 'manual'            // حركة يدوية
-  | 'transfer'          // حركة تحويل
-  | 'sale_invoice'      // فاتورة بيع
-  | 'purchase_invoice'  // فاتورة شراء
-  | 'customer_receipt'  // سند قبض
-  | 'supplier_payment'  // سند صرف
-  | 'expense'           // مستند مصروف
-  | 'sales_return'      // فاتورة مرتجع بيع
-  | 'purchase_return'   // فاتورة مرتجع شراء
-  | 'correction';       // تسوية أو تصحيح
+  | 'manual'            
+  | 'transfer'          
+  | 'sale_invoice'      
+  | 'purchase_invoice'  
+  | 'customer_receipt'  
+  | 'supplier_payment'  
+  | 'expense'           
+  | 'sales_return'      
+  | 'purchase_return'   
+  | 'correction'
+  | 'opening_stock'     // رصيد افتتاحي
+  | 'adjustment'        // تسوية/جرد
+  | 'damage';           // هالك
 
 export type TransactionStatus = 
-  | 'active'            // حركة سارية ومؤثرة على الرصيد (وتشمل الحركات العكسية reverse نفسها)
-  | 'reversed';         // حركة تم عكس أثرها المالي وإبطالها بحركة تصحيحية (لا تدخل في إجماليات الداخل/الخارج)
+  | 'active'            
+  | 'reversed';         
 
 export interface FinancialTransaction extends BaseEntity {
-  cashboxId: string;             // معرف الخزينة التي تمت عليها الحركة
-  type: TransactionType;         // نوع الحركة
-  flow: TransactionFlow;         // دخول أو خروج
-  amount: number;                // قيمة الحركة
-  balanceAfter: number;          // الرصيد بعد الحركة (للعرض السريع في كشف الحساب - لا يُعدل يدوياً)
+  cashboxId: string;             
+  type: TransactionType;         
+  flow: TransactionFlow;         
+  amount: number;                
+  balanceAfter: number;          
+  referenceType: ReferenceType;  
+  referenceId?: string;          
+  transferId?: string;           
+  counterpartCashboxId?: string; 
+  counterpartCashboxName?: string; 
+  description: string;           
+  status: TransactionStatus;     
+  reversedByTransactionId?: string; 
+  createdBy: string;             
+}
+
+
+// ----------------------------------------------------------------------
+// 4. البيانات الأساسية للأصناف (Master Data: Categories & Products)
+// ----------------------------------------------------------------------
+export interface Category extends BaseEntity {
+  name: string;
+  description?: string;
+  isActive: boolean;
+  isDeleted: boolean; // Soft delete لمنع كسر المنتجات المرتبطة
+}
+
+export interface Product extends BaseEntity {
+  categoryId: string;
+  name: string;
+  sku?: string;           // كود داخلي
+  barcode?: string;       // باركود دولي أو محلي
+  price1: number;         // سعر البيع 1 (قطاعي مثلاً)
+  price2: number;         // سعر البيع 2 (جملة)
+  price3: number;         // سعر البيع 3 (نصف جملة)
+  price4: number;         // سعر البيع 4 (خاص)
+  reorderLevel: number;   // حد إعادة الطلب
+  isActive: boolean;
+  isDeleted: boolean;     // Soft delete لمنع كسر الفواتير التاريخية
+  // ملاحظة: لا يوجد أي حقول للكمية (stock) أو التكلفة (cost) هنا.
+}
+
+
+// ----------------------------------------------------------------------
+// 5. المخزون وحركاته (Inventory & Movements Ledger)
+// ----------------------------------------------------------------------
+
+// 5.1 حالة المخزون المخبأة (Cached State)
+export interface InventoryItem {
+  id: string;             // Composite ID (e.g., warehouseId_productId)
+  productId: string;
+  warehouseId: string;
+  quantity: number;       // الكمية الحالية (للعرض فقط)
+  wac: number;            // متوسط التكلفة المرجح (يُحفظ بدقة 4 منازل عشرية)
+  inventoryValue: number; // إجمالي قيمة المخزون (quantity * wac)
+  lastUpdatedAt: Date;    // تاريخ آخر حركة أثرت على الرصيد أو التكلفة
+}
+
+// 5.2 أنواع واتجاهات حركة المخزون
+export type InventoryMovementType = 
+  | 'opening_stock'
+  | 'purchase'
+  | 'sale'
+  | 'purchase_return'
+  | 'sales_return'
+  | 'transfer_in'
+  | 'transfer_out'
+  | 'damage'
+  | 'adjustment';
+
+export type MovementFlow = 'in' | 'out';
+
+// 5.3 دفتر أستاذ المخزون (Source of Truth)
+export interface InventoryMovement extends BaseEntity {
+  productId: string;
+  warehouseId: string;
+  type: InventoryMovementType;
+  flow: MovementFlow;
   
-  referenceType: ReferenceType;  // نوع المستند الأصلي
-  referenceId?: string;          // معرف المستند الأصلي (في الحركة العكسية 'reverse' يكون هو ID الحركة الأصلية التي تم عكسها)
+  quantityIn: number;
+  quantityOut: number;
+  balanceAfter: number;       // رصيد الصنف في هذا المخزن بعد الحركة
   
-  transferId?: string;           // معرف التحويل (يُربط به حركتي transfer_out و transfer_in، وأيضاً حركتي العكس الخاصة بهما)
+  unitCost: number;           // التكلفة التاريخية الثابتة لهذه الحركة (للمشتريات هو سعر الشراء، للمبيعات هو الـ WAC وقت البيع)
+  averageCostAfter: number;   // متوسط التكلفة (WAC) المحسوب بعد هذه الحركة للتدقيق
   
-  // حقول خاصة بالتحويلات (لتوثيق الخزينة المقابلة بدقة دون الاعتماد على الوصف)
-  counterpartCashboxId?: string; // معرف الخزينة الطرف الآخر
-  counterpartCashboxName?: string; // اسم الخزينة الطرف الآخر (وقت تنفيذ الحركة)
+  referenceType: ReferenceType;
+  referenceId: string;        // ID الفاتورة أو الإذن
+  transferId?: string;        // ID التحويل المشترك بين مخزنين
   
-  description: string;           // البيان / الوصف (إجباري لتوثيق سبب الحركة)
+  description?: string;
+  createdBy: string;
+}
+
+
+// ----------------------------------------------------------------------
+// 6. المبيعات والأرباح (Sales Invoices Data Model Base)
+// تم إضافتها لتثبيت قواعد حساب الربحية بدقة
+// ----------------------------------------------------------------------
+export interface SalesInvoiceItem {
+  id: string;
+  productId: string;
+  quantity: number;
+  unitPrice: number;      // سعر البيع للوحدة
+  totalPrice: number;     // quantity * unitPrice (قبل الخصم)
+  discount: number;       // نصيب هذا السطر من الخصم (أو خصم خاص به)
+  netTotal: number;       // totalPrice - discount
   
-  status: TransactionStatus;     // حالة الحركة (فعالة أو تم عكسها)
-  reversedByTransactionId?: string; // في حال تم إلغاء الحركة، يُكتب هنا ID الحركة العكسية (للتدقيق Audit Trail)
+  cogs: number;           // (Historical WAC وقت البيع) * quantity
+  grossProfit: number;    // netTotal - cogs
+}
+
+export interface SalesInvoice extends BaseEntity {
+  customerId?: string;
+  warehouseId: string;
+  cashboxId?: string;     // الخزينة التي تم التوريد إليها (إن وجد دفع فوري)
+
+  grossSales: number;     // إجمالي المبيعات (مجموع totalPrice للسطور)
+  discount: number;       // إجمالي الخصومات
+  additionalAmount: number; // رسوم إضافية (توصيل/خدمة)
+  netSales: number;       // grossSales - discount + additionalAmount
   
-  createdBy: string;             // معرف المستخدم الذي قام بالحركة (لتتبع المسؤولية)
+  cogs: number;           // إجمالي تكلفة البضاعة المباعة (مجموع cogs للسطور)
+  grossProfit: number;    // netSales - cogs (الربح التاريخي الثابت للفاتورة)
+
+  paidAmount: number;     // ما تم دفعه
+  remainingAmount: number;// المتبقي (آجل)
+
+  createdBy: string;
 }
