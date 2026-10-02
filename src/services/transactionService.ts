@@ -5,14 +5,13 @@ import { Cashbox, CashboxTransaction, FinancialReferenceType, TransactionType } 
 const CASHBOXES_COLLECTION = 'cashboxes';
 const TRANSACTIONS_COLLECTION = 'cashbox_transactions';
 
-// تم إرجاع الاسم لـ ManualTransactionParams ليتطابق مع الـ Store
 export interface ManualTransactionParams {
   cashboxId: string;
   type: TransactionType;
   amount: number;
-  referenceType: FinancialReferenceType;
-  referenceId: string;
-  description: string;
+  referenceType?: FinancialReferenceType;
+  referenceId?: string;
+  description?: string;
   createdBy: string;
 }
 
@@ -20,7 +19,7 @@ export interface TransferOperationParams {
   sourceCashboxId: string;
   destCashboxId: string;
   amount: number;
-  transferId: string; // معرف فريد للتحويل لمنع التكرار
+  transferId?: string; 
   description?: string;
   createdBy: string;
 }
@@ -38,13 +37,19 @@ const validateAmount = (val: number) => {
 
 export const processManualTransactionInTransaction = async (
   transaction: FirestoreTransaction,
-  params: ManualTransactionParams
+  params: ManualTransactionParams,
+  generatedId: string
 ): Promise<void> => {
+  if (!params.cashboxId) throw new Error("معرف الخزينة مفقود");
+  
+  if (params.type !== 'in' && params.type !== 'out') {
+    throw new Error(`نوع العملية غير صالح: ${params.type}. يجب أن يكون 'in' أو 'out' فقط.`);
+  }
+
   validateAmount(params.amount);
 
-  // --- مرحلة 1: القراءات (Reads) ---
-  const transactionDocId = `${params.referenceId}_${params.type}_${params.cashboxId}`;
-  const transactionRef = doc(db, TRANSACTIONS_COLLECTION, transactionDocId);
+  // مرحلة 1: القراءات (Reads)
+  const transactionRef = doc(db, TRANSACTIONS_COLLECTION, generatedId);
   const cashboxRef = doc(db, CASHBOXES_COLLECTION, params.cashboxId);
 
   const [transactionSnap, cashboxSnap] = await Promise.all([
@@ -52,13 +57,14 @@ export const processManualTransactionInTransaction = async (
     transaction.get(cashboxRef)
   ]);
 
+  // حماية Idempotency
   if (transactionSnap.exists()) return;
 
   if (!cashboxSnap.exists()) {
     throw new Error(`الخزينة المطلوبة غير موجودة (${params.cashboxId})`);
   }
 
-  // --- مرحلة 2: الحسابات (Calculations) ---
+  // مرحلة 2: الحسابات
   const cashboxData = cashboxSnap.data() as Cashbox;
   const currentBalance = Number.isFinite(cashboxData.balance) ? cashboxData.balance : 0;
 
@@ -80,36 +86,35 @@ export const processManualTransactionInTransaction = async (
     type: params.type,
     amount: params.amount,
     balanceAfter: newBalance,
-    referenceType: params.referenceType,
-    referenceId: params.referenceId,
-    description: params.description,
-    createdBy: params.createdBy,
+    referenceType: params.referenceType || 'manual',
+    referenceId: params.referenceId || generatedId,
+    description: params.description || '',
+    createdBy: params.createdBy || 'system',
     createdAt: now as unknown as Date,
   };
 
-  // --- مرحلة 3: الكتابات (Writes) ---
+  // مرحلة 3: الكتابات (Writes)
   transaction.set(transactionRef, transactionData);
   transaction.update(cashboxRef, { balance: newBalance, updatedAt: now as unknown as Date });
 };
 
 export const processTransferInTransaction = async (
   transaction: FirestoreTransaction,
-  params: TransferOperationParams
+  params: TransferOperationParams,
+  transferId: string
 ): Promise<void> => {
-  if (params.sourceCashboxId === params.destCashboxId) {
-    throw new Error('لا يمكن التحويل لنفس الخزينة');
-  }
+  if (!params.sourceCashboxId || !params.destCashboxId) throw new Error("معرف الخزينة المصدر أو المستقبل مفقود");
+  if (params.sourceCashboxId === params.destCashboxId) throw new Error("لا يمكن التحويل لنفس الخزينة");
+  
   validateAmount(params.amount);
 
-  const outTransactionId = `${params.transferId}_out_${params.sourceCashboxId}`;
-  const inTransactionId = `${params.transferId}_in_${params.destCashboxId}`;
-  
-  const outRef = doc(db, TRANSACTIONS_COLLECTION, outTransactionId);
-  const inRef = doc(db, TRANSACTIONS_COLLECTION, inTransactionId);
+  const outRef = doc(db, TRANSACTIONS_COLLECTION, `${transferId}_out_${params.sourceCashboxId}`);
+  const inRef = doc(db, TRANSACTIONS_COLLECTION, `${transferId}_in_${params.destCashboxId}`);
 
   const sourceCashboxRef = doc(db, CASHBOXES_COLLECTION, params.sourceCashboxId);
   const destCashboxRef = doc(db, CASHBOXES_COLLECTION, params.destCashboxId);
 
+  // مرحلة 1: القراءات
   const [outSnap, inSnap, sourceSnap, destSnap] = await Promise.all([
     transaction.get(outRef),
     transaction.get(inRef),
@@ -120,14 +125,16 @@ export const processTransferInTransaction = async (
   const outExists = outSnap.exists();
   const inExists = inSnap.exists();
 
+  // حماية Idempotency والتحويل الجزئي
   if (outExists && inExists) return;
   if (outExists !== inExists) {
-    throw new Error(`حالة تحويل مالي غير متسقة: يجب أن تكون حركتا التحويل الصادر والوارد موجودتين معًا أو غير موجودتين معًا.`);
+    throw new Error(`حالة تحويل مالي غير متسقة.`);
   }
 
   if (!sourceSnap.exists()) throw new Error('الخزينة المصدر غير موجودة');
   if (!destSnap.exists()) throw new Error('الخزينة المستقبلة غير موجودة');
 
+  // مرحلة 2: الحسابات
   const sourceData = sourceSnap.data() as Cashbox;
   const destData = destSnap.data() as Cashbox;
 
@@ -148,9 +155,9 @@ export const processTransferInTransaction = async (
     amount: params.amount,
     balanceAfter: newSourceBalance,
     referenceType: 'transfer',
-    referenceId: params.transferId,
+    referenceId: transferId,
     description: params.description || 'تحويل صادر',
-    createdBy: params.createdBy,
+    createdBy: params.createdBy || 'system',
     createdAt: now as unknown as Date,
   };
 
@@ -160,12 +167,13 @@ export const processTransferInTransaction = async (
     amount: params.amount,
     balanceAfter: newDestBalance,
     referenceType: 'transfer',
-    referenceId: params.transferId,
+    referenceId: transferId,
     description: params.description || 'تحويل وارد',
-    createdBy: params.createdBy,
+    createdBy: params.createdBy || 'system',
     createdAt: now as unknown as Date,
   };
 
+  // مرحلة 3: الكتابات
   transaction.set(outRef, outTransactionData);
   transaction.set(inRef, inTransactionData);
   transaction.update(sourceCashboxRef, { balance: newSourceBalance, updatedAt: now as unknown as Date });
@@ -177,19 +185,27 @@ export const processTransferInTransaction = async (
 // ==========================================
 
 export const processManualTransaction = async (params: ManualTransactionParams): Promise<void> => {
+  // توليد المعرف خارج الـ Transaction لضمان الاستقرار عند الـ Retry
+  const generatedId = params.referenceId 
+    ? `${params.referenceId}_${params.type}_${params.cashboxId}` 
+    : doc(collection(db, TRANSACTIONS_COLLECTION)).id;
+
   await runTransaction(db, async (transaction) => {
-    await processManualTransactionInTransaction(transaction, params);
+    await processManualTransactionInTransaction(transaction, params, generatedId);
   });
 };
 
 export const processTransfer = async (params: TransferOperationParams): Promise<void> => {
+  // توليد المعرف خارج الـ Transaction لضمان الاستقرار عند الـ Retry
+  const transferId = params.transferId || doc(collection(db, TRANSACTIONS_COLLECTION)).id;
+
   await runTransaction(db, async (transaction) => {
-    await processTransferInTransaction(transaction, params);
+    await processTransferInTransaction(transaction, params, transferId);
   });
 };
 
 // ==========================================
-// 3. Reversal Functions (To satisfy the Store requirements)
+// 3. Reversal Functions
 // ==========================================
 
 export const reverseTransaction = async (transactionId: string, createdBy: string): Promise<void> => {
@@ -238,7 +254,6 @@ export const reverseTransaction = async (transactionId: string, createdBy: strin
 };
 
 export const reverseTransfer = async (transferId: string, createdBy: string): Promise<void> => {
-  // لأغراض الأمان في النظام المحاسبي، يتم رمي خطأ لإجبار المستخدم على عمل تحويل عكسي يدوياً
   throw new Error("عفواً، لضمان سلامة الأرصدة، يرجى عمل تحويل مالي عكسي يدوياً لإلغاء هذا التحويل.");
 };
 
