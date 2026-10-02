@@ -9,6 +9,7 @@ import MainLayout from "./layouts/MainLayout";
 import Login from "./pages/auth/Login";
 import ProtectedRoute from "./components/auth/ProtectedRoute";
 import Warehouses from "./pages/master-data/Warehouses";
+import WarehouseDetails from "./pages/master-data/WarehouseDetails";
 import Cashboxes from "./pages/master-data/Cashboxes";
 import CashboxDetails from "./pages/master-data/CashboxDetails";
 import Categories from "./pages/master-data/Categories";
@@ -53,6 +54,7 @@ function App() {
               
               {/* شاشات البيانات الأساسية (Master Data) */}
               <Route path="warehouses" element={<Warehouses />} />
+              <Route path="warehouses/:id" element={<WarehouseDetails />} />
               <Route path="categories" element={<Categories />} />
               <Route path="products" element={<Products />} />
               <Route path="cashboxes" element={<Cashboxes />} />
