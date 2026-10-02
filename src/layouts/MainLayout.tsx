@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { LogOut, User, LayoutDashboard, Store, Wallet, Tags, Menu, X } from "lucide-react";
+import { LogOut, User, LayoutDashboard, Store, Wallet, Tags, Menu, X, Package } from "lucide-react";
 import { signOut } from "firebase/auth";
 import { auth } from "../config/firebase";
 import { useAuthStore } from "../store/authStore";
@@ -78,6 +78,11 @@ export default function MainLayout() {
           <NavLink to="/categories" onClick={closeSidebar} className={navLinkClass}>
             <Tags className="h-5 w-5" />
             <span>فئات الأصناف</span>
+          </NavLink>
+
+          <NavLink to="/products" onClick={closeSidebar} className={navLinkClass}>
+            <Package className="h-5 w-5" />
+            <span>المنتجات</span>
           </NavLink>
 
           <NavLink to="/cashboxes" onClick={closeSidebar} className={navLinkClass}>
