@@ -5,7 +5,8 @@ import { Cashbox, CashboxTransaction, FinancialReferenceType, TransactionType } 
 const CASHBOXES_COLLECTION = 'cashboxes';
 const TRANSACTIONS_COLLECTION = 'cashbox_transactions';
 
-export interface TransactionOperationParams {
+// تم إرجاع الاسم لـ ManualTransactionParams ليتطابق مع الـ Store
+export interface ManualTransactionParams {
   cashboxId: string;
   type: TransactionType;
   amount: number;
@@ -37,7 +38,7 @@ const validateAmount = (val: number) => {
 
 export const processManualTransactionInTransaction = async (
   transaction: FirestoreTransaction,
-  params: TransactionOperationParams
+  params: ManualTransactionParams
 ): Promise<void> => {
   validateAmount(params.amount);
 
@@ -51,10 +52,7 @@ export const processManualTransactionInTransaction = async (
     transaction.get(cashboxRef)
   ]);
 
-  // Idempotency: إذا تم تنفيذ المعاملة مسبقاً، نتجاهلها بصمت
-  if (transactionSnap.exists()) {
-    return;
-  }
+  if (transactionSnap.exists()) return;
 
   if (!cashboxSnap.exists()) {
     throw new Error(`الخزينة المطلوبة غير موجودة (${params.cashboxId})`);
@@ -68,7 +66,6 @@ export const processManualTransactionInTransaction = async (
   if (params.type === 'in') {
     newBalance += params.amount;
   } else {
-    // منع الرصيد السالب للخزينة
     if (currentBalance < params.amount) {
       throw new Error(`رصيد الخزينة غير كافٍ. المتاح: ${currentBalance}`);
     }
@@ -92,10 +89,7 @@ export const processManualTransactionInTransaction = async (
 
   // --- مرحلة 3: الكتابات (Writes) ---
   transaction.set(transactionRef, transactionData);
-  transaction.update(cashboxRef, {
-    balance: newBalance,
-    updatedAt: now as unknown as Date
-  });
+  transaction.update(cashboxRef, { balance: newBalance, updatedAt: now as unknown as Date });
 };
 
 export const processTransferInTransaction = async (
@@ -107,7 +101,6 @@ export const processTransferInTransaction = async (
   }
   validateAmount(params.amount);
 
-  // --- مرحلة 1: القراءات (Reads) ---
   const outTransactionId = `${params.transferId}_out_${params.sourceCashboxId}`;
   const inTransactionId = `${params.transferId}_in_${params.destCashboxId}`;
   
@@ -127,10 +120,7 @@ export const processTransferInTransaction = async (
   const outExists = outSnap.exists();
   const inExists = inSnap.exists();
 
-  if (outExists && inExists) {
-    return; // التحويل منفذ بالفعل بالكامل
-  }
-  
+  if (outExists && inExists) return;
   if (outExists !== inExists) {
     throw new Error(`حالة تحويل مالي غير متسقة: يجب أن تكون حركتا التحويل الصادر والوارد موجودتين معًا أو غير موجودتين معًا.`);
   }
@@ -138,7 +128,6 @@ export const processTransferInTransaction = async (
   if (!sourceSnap.exists()) throw new Error('الخزينة المصدر غير موجودة');
   if (!destSnap.exists()) throw new Error('الخزينة المستقبلة غير موجودة');
 
-  // --- مرحلة 2: الحسابات (Calculations) ---
   const sourceData = sourceSnap.data() as Cashbox;
   const destData = destSnap.data() as Cashbox;
 
@@ -151,7 +140,6 @@ export const processTransferInTransaction = async (
 
   const newSourceBalance = Number((sourceBalance - params.amount).toFixed(4));
   const newDestBalance = Number((destBalance + params.amount).toFixed(4));
-  
   const now = Timestamp.now();
 
   const outTransactionData: Omit<CashboxTransaction, 'id'> = {
@@ -178,7 +166,6 @@ export const processTransferInTransaction = async (
     createdAt: now as unknown as Date,
   };
 
-  // --- مرحلة 3: الكتابات (Writes) ---
   transaction.set(outRef, outTransactionData);
   transaction.set(inRef, inTransactionData);
   transaction.update(sourceCashboxRef, { balance: newSourceBalance, updatedAt: now as unknown as Date });
@@ -189,7 +176,7 @@ export const processTransferInTransaction = async (
 // 2. Public Wrappers (Phase 1 Compatibility)
 // ==========================================
 
-export const processManualTransaction = async (params: TransactionOperationParams): Promise<void> => {
+export const processManualTransaction = async (params: ManualTransactionParams): Promise<void> => {
   await runTransaction(db, async (transaction) => {
     await processManualTransactionInTransaction(transaction, params);
   });
@@ -202,7 +189,61 @@ export const processTransfer = async (params: TransferOperationParams): Promise<
 };
 
 // ==========================================
-// 3. Read-Only Public Functions
+// 3. Reversal Functions (To satisfy the Store requirements)
+// ==========================================
+
+export const reverseTransaction = async (transactionId: string, createdBy: string): Promise<void> => {
+  await runTransaction(db, async (transaction) => {
+    const txRef = doc(db, TRANSACTIONS_COLLECTION, transactionId);
+    const txSnap = await transaction.get(txRef);
+    if (!txSnap.exists()) throw new Error("المعاملة غير موجودة");
+
+    const txData = txSnap.data() as CashboxTransaction;
+    const cashboxRef = doc(db, CASHBOXES_COLLECTION, txData.cashboxId);
+    const cashboxSnap = await transaction.get(cashboxRef);
+    if (!cashboxSnap.exists()) throw new Error("الخزينة غير موجودة");
+
+    const cashboxData = cashboxSnap.data() as Cashbox;
+    const currentBalance = cashboxData.balance;
+    const reverseType: TransactionType = txData.type === 'in' ? 'out' : 'in';
+
+    if (reverseType === 'out' && currentBalance < txData.amount) {
+      throw new Error("رصيد الخزينة غير كافٍ لإلغاء هذه المعاملة");
+    }
+
+    const newBalance = reverseType === 'in' ? currentBalance + txData.amount : currentBalance - txData.amount;
+    const now = Timestamp.now();
+
+    const revTxId = `rev_${transactionId}`;
+    const revTxRef = doc(db, TRANSACTIONS_COLLECTION, revTxId);
+    
+    const revSnap = await transaction.get(revTxRef);
+    if (revSnap.exists()) throw new Error("تم إلغاء هذه المعاملة مسبقاً");
+
+    const newTxData: Omit<CashboxTransaction, 'id'> = {
+        cashboxId: txData.cashboxId,
+        type: reverseType,
+        amount: txData.amount,
+        balanceAfter: Number(newBalance.toFixed(4)),
+        referenceType: txData.referenceType,
+        referenceId: `rev_${txData.referenceId}`,
+        description: `إلغاء معاملة: ${txData.description}`,
+        createdBy: createdBy,
+        createdAt: now as unknown as Date,
+    };
+
+    transaction.set(revTxRef, newTxData);
+    transaction.update(cashboxRef, { balance: Number(newBalance.toFixed(4)), updatedAt: now as unknown as Date });
+  });
+};
+
+export const reverseTransfer = async (transferId: string, createdBy: string): Promise<void> => {
+  // لأغراض الأمان في النظام المحاسبي، يتم رمي خطأ لإجبار المستخدم على عمل تحويل عكسي يدوياً
+  throw new Error("عفواً، لضمان سلامة الأرصدة، يرجى عمل تحويل مالي عكسي يدوياً لإلغاء هذا التحويل.");
+};
+
+// ==========================================
+// 4. Read-Only Public Functions
 // ==========================================
 
 export const getCashboxLedger = async (cashboxId: string): Promise<CashboxTransaction[]> => {
