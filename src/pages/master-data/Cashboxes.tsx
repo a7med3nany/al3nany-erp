@@ -2,11 +2,12 @@ import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
-import { Loader2, Plus, Edit, Wallet, Landmark, Smartphone, Banknote, ShieldCheck, Clock, X, CreditCard } from "lucide-react";
+import { Loader2, Plus, Edit, Wallet, Landmark, Smartphone, Banknote, ShieldCheck, Clock, X, CreditCard, FileText } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import { useCashboxStore } from "../../store/cashboxStore";
 import { Cashbox, CashboxType } from "../../types";
 
-// شروط التحقق من صحة بيانات الخزينة (نلاحظ عدم وجود حقل الرصيد هنا لأنه للعرض فقط)
+// شروط التحقق من صحة بيانات الخزينة
 const cashboxSchema = z.object({
   name: z.string().min(2, { message: "اسم الخزينة/الحساب مطلوب (حرفين على الأقل)" }),
   type: z.enum(['cash', 'bank', 'wallet', 'digital'], { required_error: "يرجى اختيار نوع الحساب" }),
@@ -25,6 +26,7 @@ const cashboxTypeDetails: Record<CashboxType, { label: string; icon: JSX.Element
 };
 
 export default function Cashboxes() {
+  const navigate = useNavigate();
   const { cashboxes, isLoading, error, fetchCashboxes, createCashbox, editCashbox } = useCashboxStore();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -44,7 +46,6 @@ export default function Cashboxes() {
     },
   });
 
-  // جلب الخزائن عند تحميل الصفحة
   useEffect(() => {
     fetchCashboxes();
   }, [fetchCashboxes]);
@@ -83,7 +84,6 @@ export default function Cashboxes() {
     }
   };
 
-  // دالة لتنسيق الأرقام كعملة (جنيه مصري)
   const formatCurrency = (amount: number) => {
     return new Intl.NumberFormat("ar-EG", {
       style: "currency",
@@ -91,14 +91,11 @@ export default function Cashboxes() {
     }).format(amount);
   };
 
-  // الخزنة الجاري تعديلها (إن وجدت)
   const editingCashbox = editingId ? cashboxes.find(c => c.id === editingId) : null;
-  // هل الخزنة الجاري تعديلها محمية من التعطيل؟
   const isProtected = editingCashbox?.isMain || editingCashbox?.isDaily;
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
-      {/* رأس الصفحة */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-card p-6 rounded-xl border border-border shadow-sm">
         <div>
           <h1 className="text-2xl font-bold text-primary flex items-center gap-2">
@@ -124,7 +121,6 @@ export default function Cashboxes() {
         </div>
       )}
 
-      {/* قائمة الخزائن */}
       <div className="bg-card border border-border rounded-xl shadow-sm overflow-hidden">
         {isLoading && cashboxes.length === 0 ? (
           <div className="flex flex-col items-center justify-center p-12 text-muted-foreground">
@@ -141,7 +137,7 @@ export default function Cashboxes() {
                   <th className="px-6 py-4 font-semibold">التصنيف</th>
                   <th className="px-6 py-4 font-semibold">الرصيد المحسوب</th>
                   <th className="px-6 py-4 font-semibold">الحالة</th>
-                  <th className="px-6 py-4 font-semibold w-24">إجراءات</th>
+                  <th className="px-6 py-4 font-semibold w-32">إجراءات</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
@@ -189,13 +185,22 @@ export default function Cashboxes() {
                       )}
                     </td>
                     <td className="px-6 py-4">
-                      <button
-                        onClick={() => handleOpenEdit(cashbox)}
-                        className="text-blue-600 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 p-2 rounded-md transition-colors"
-                        title="تعديل الحساب"
-                      >
-                        <Edit className="h-4 w-4" />
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => navigate(`/cashboxes/${cashbox.id}`)}
+                          className="text-primary hover:text-primary/80 bg-primary/10 hover:bg-primary/20 p-2 rounded-md transition-colors"
+                          title="كشف الحساب التفصيلي"
+                        >
+                          <FileText className="h-4 w-4" />
+                        </button>
+                        <button
+                          onClick={() => handleOpenEdit(cashbox)}
+                          className="text-blue-600 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 p-2 rounded-md transition-colors"
+                          title="تعديل بيانات الحساب"
+                        >
+                          <Edit className="h-4 w-4" />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -212,7 +217,6 @@ export default function Cashboxes() {
         )}
       </div>
 
-      {/* نافذة الإضافة / التعديل (Modal) */}
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="bg-card w-full max-w-md rounded-xl shadow-xl border border-border overflow-hidden animate-in zoom-in-95 duration-200">
@@ -264,7 +268,6 @@ export default function Cashboxes() {
                 />
               </div>
 
-              {/* تحذير الحماية إذا كانت الخزنة رئيسية أو خزنة اليوم */}
               {isProtected ? (
                 <div className="p-3 bg-amber-50 border border-amber-200 rounded-md mt-4">
                   <p className="text-xs text-amber-800 flex items-center gap-1.5">
