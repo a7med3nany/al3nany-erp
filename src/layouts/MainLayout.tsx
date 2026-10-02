@@ -49,7 +49,7 @@ export default function MainLayout() {
         } flex flex-col`}
       >
         <div className="h-16 flex items-center justify-between px-6 border-b border-border">
-          <h1 className="text-xl font-bold text-primary">عروج ERP</h1>
+          <h1 className="text-xl font-bold text-primary font-mono tracking-wider">EL3NANY ERP</h1>
           <button 
             className="lg:hidden text-muted-foreground hover:text-foreground"
             onClick={() => setIsSidebarOpen(false)}
@@ -122,7 +122,7 @@ export default function MainLayout() {
             >
               <Menu className="h-6 w-6" />
             </button>
-            <h1 className="text-lg font-bold text-primary">عروج ERP</h1>
+            <h1 className="text-lg font-bold text-primary font-mono tracking-wider">EL3NANY ERP</h1>
           </div>
         </header>
 
