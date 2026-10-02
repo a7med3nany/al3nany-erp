@@ -149,11 +149,13 @@ export const processTransferInTransaction = async (
       outData.amount === params.amount &&
       outData.referenceType === 'transfer' &&
       outData.referenceId === transferId &&
+      outData.counterpartCashboxId === params.destCashboxId &&
       inData.type === 'in' &&
       inData.cashboxId === params.destCashboxId &&
       inData.amount === params.amount &&
       inData.referenceType === 'transfer' &&
-      inData.referenceId === transferId
+      inData.referenceId === transferId &&
+      inData.counterpartCashboxId === params.sourceCashboxId
     ) {
       return; // Idempotent Success
     } else {
@@ -195,6 +197,7 @@ export const processTransferInTransaction = async (
     description: params.description || 'تحويل صادر',
     createdBy: params.createdBy || 'system',
     createdAt: now as unknown as Date,
+    counterpartCashboxId: params.destCashboxId,
   };
 
   const inTransactionData: Omit<CashboxTransaction, 'id'> = {
@@ -207,6 +210,7 @@ export const processTransferInTransaction = async (
     description: params.description || 'تحويل وارد',
     createdBy: params.createdBy || 'system',
     createdAt: now as unknown as Date,
+    counterpartCashboxId: params.sourceCashboxId,
   };
 
   transaction.set(outRef, outTransactionData);
@@ -389,7 +393,7 @@ export const reverseTransfer = async (
 
     const reverseInForSourceData: Omit<CashboxTransaction, 'id'> = {
       cashboxId: sourceCashboxId,
-      type: 'in', 
+      type: 'in', // إرجاع المبلغ للمصدر
       amount: originalAmount,
       balanceAfter: newSourceBalance,
       referenceType: 'transfer',
@@ -401,7 +405,7 @@ export const reverseTransfer = async (
 
     const reverseOutForDestData: Omit<CashboxTransaction, 'id'> = {
       cashboxId: destCashboxId,
-      type: 'out', 
+      type: 'out', // سحب المبلغ من المستقبل
       amount: originalAmount,
       balanceAfter: newDestBalance,
       referenceType: 'transfer',
