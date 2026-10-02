@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { 
   ArrowRight, ArrowUpRight, ArrowDownLeft, ArrowLeftRight, 
@@ -27,6 +27,9 @@ export default function CashboxDetails() {
 
   const cashbox = cashboxes.find(c => c.id === id);
 
+  // Ref للتحكم في التمرير التلقائي لأسفل السجل (أحدث حركة)
+  const bottomScrollRef = useRef<HTMLDivElement>(null);
+
   // States for Modals
   const [isManualModalOpen, setIsManualModalOpen] = useState(false);
   const [manualType, setManualType] = useState<'in' | 'out'>('in');
@@ -54,6 +57,13 @@ export default function CashboxDetails() {
     }
   }, [id, fetchCashboxes, fetchLedger]);
 
+  // التمرير التلقائي لأسفل السجل عند تحميل البيانات أو تحديثها لتكون أحدث حركة ظاهرة
+  useEffect(() => {
+    if (!isTxLoading && transactions.length > 0) {
+      bottomScrollRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [transactions, isTxLoading]);
+
   // مسح رسالة النجاح تلقائياً بعد 4 ثوانٍ
   useEffect(() => {
     if (successMessage) {
@@ -62,13 +72,17 @@ export default function CashboxDetails() {
     }
   }, [successMessage]);
 
+  // ترتيب الحركات ليكون: الأقدم في الأعلى والأحدث في الأسفل (Chronological Order)
   const filteredTransactions = useMemo(() => {
-    return transactions.filter(tx => {
+    const filtered = transactions.filter(tx => {
       const matchSearch = tx.description?.toLowerCase().includes(searchTerm.toLowerCase()) ||
                           tx.referenceId?.toLowerCase().includes(searchTerm.toLowerCase());
       const matchType = filterType ? tx.type === filterType : true;
       return matchSearch && matchType;
     });
+
+    // عكس الترتيب ليكون من الأقدم إلى الأحدث
+    return [...filtered].reverse();
   }, [transactions, searchTerm, filterType]);
 
   // فحص ما إذا كانت الحركة قد تم عكسها بالفعل
@@ -407,6 +421,8 @@ export default function CashboxDetails() {
                 )}
               </tbody>
             </table>
+            {/* عنصر مرجعي للتمرير التلقائي لأحدث حركة في أسفل الجدول */}
+            <div ref={bottomScrollRef} />
           </div>
         )}
       </div>
