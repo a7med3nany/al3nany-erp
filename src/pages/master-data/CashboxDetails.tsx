@@ -71,9 +71,15 @@ export default function CashboxDetails() {
     });
   }, [transactions, searchTerm, filterType]);
 
-  // فحص ما إذا كانت الحركة قد تم عكسها بالفعل (بالبحث عن حركتها العكسية في نفس السجل)
+  // فحص ما إذا كانت الحركة قد تم عكسها بالفعل
   const isTxReversed = (tx: CashboxTransaction) => {
     return transactions.some(t => t.referenceId === `rev_${tx.referenceId}`);
+  };
+
+  const getCounterpartName = (counterpartId?: string) => {
+    if (!counterpartId) return 'خزينة غير معروفة';
+    const found = cashboxes.find(c => c.id === counterpartId);
+    return found ? found.name : 'خزينة غير معروفة (أو محذوفة)';
   };
 
   const resetForms = () => {
@@ -153,16 +159,23 @@ export default function CashboxDetails() {
     
     try {
       if (txToReverse.referenceType === 'transfer') {
-        // بما أن الـ CashboxTransaction لا يحمل صراحة الـ counterpart ID 
-        // وممنوع عمل استعلام خارجي هنا، فلا يمكننا تحديد الطرف الآخر بأمان לעكس التحويل الذري.
-        throw new Error('تعذر تحديد الخزينة المقابلة لهذا التحويل للقيام بعملية العكس بأمان.');
-        
-        /* 
-         * الكود الصحيح إذا توفرت بيانات الطرف الآخر سيكون:
-         * await reverseTransfer(txToReverse.referenceId, sourceId, destId, 'admin');
-         */
+        if (!txToReverse.counterpartCashboxId) {
+          throw new Error('هذه الحركة القديمة لا تحتوي على بيانات الخزنة المقابلة ولا يمكن عكسها بأمان.');
+        }
+
+        let sourceId = '';
+        let destId = '';
+
+        if (txToReverse.type === 'out') {
+          sourceId = txToReverse.cashboxId;
+          destId = txToReverse.counterpartCashboxId;
+        } else {
+          sourceId = txToReverse.counterpartCashboxId;
+          destId = txToReverse.cashboxId;
+        }
+
+        await reverseTransfer(txToReverse.referenceId, sourceId, destId, 'admin');
       } else {
-        // إلغاء معاملة يدوية عادية
         await reverseTx(txToReverse.id, 'admin');
       }
 
@@ -345,7 +358,18 @@ export default function CashboxDetails() {
                           </span>
                         </div>
                         <div className="text-foreground font-medium">{tx.description || '-'}</div>
-                        <div className="text-xs text-muted-foreground mt-0.5 font-mono text-left block w-fit" dir="ltr">#{tx.referenceId}</div>
+                        
+                        {/* إظهار الخزنة المقابلة في حالة التحويل */}
+                        {tx.referenceType === 'transfer' && tx.counterpartCashboxId && (
+                          <div className="text-xs text-muted-foreground mt-1">
+                            {tx.type === 'out' ? 'تحويل إلى: ' : 'تحويل من: '}
+                            <span className="font-semibold text-foreground">
+                              {getCounterpartName(tx.counterpartCashboxId)}
+                            </span>
+                          </div>
+                        )}
+
+                        <div className="text-xs text-muted-foreground mt-1 font-mono text-left block w-fit" dir="ltr">#{tx.referenceId}</div>
                       </td>
                       <td className="px-4 py-3 align-top text-center">
                         <span className={`font-bold ${tx.type === 'in' ? 'text-emerald-600' : 'text-rose-600'}`}>
@@ -541,6 +565,12 @@ export default function CashboxDetails() {
               <div className="text-sm text-muted-foreground p-3 bg-secondary/50 rounded-lg text-right">
                 <p><strong>المبلغ:</strong> {Number(txToReverse.amount).toLocaleString()}</p>
                 <p><strong>البيان:</strong> {txToReverse.description || 'بدون بيان'}</p>
+                {txToReverse.referenceType === 'transfer' && txToReverse.counterpartCashboxId && (
+                  <p className="mt-1 pt-1 border-t border-border/50 text-xs text-foreground">
+                    {txToReverse.type === 'out' ? 'إلى خزينة: ' : 'من خزينة: '} 
+                    <span className="font-bold">{getCounterpartName(txToReverse.counterpartCashboxId)}</span>
+                  </p>
+                )}
               </div>
 
               {txToReverse.referenceType === 'transfer' ? (
