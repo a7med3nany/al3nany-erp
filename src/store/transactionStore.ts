@@ -1,140 +1,124 @@
 import { create } from 'zustand';
-import { FinancialTransaction } from '../types';
 import { 
-  getCashboxLedger, 
   processManualTransaction, 
   processTransfer, 
-  reverseTransaction,
-  reverseTransfer,
-  ManualTransactionParams,
-  TransferParams,
-  ReverseTransactionParams,
-  ReverseTransferParams
+  getCashboxLedger,
+  reverseTransaction
 } from '../services/transactionService';
-import { useCashboxStore } from './cashboxStore';
+import { CashboxTransaction, TransactionType } from '../types';
 
-interface TransactionState {
-  transactions: FinancialTransaction[];
-  loading: boolean;
+export interface ManualTransactionPayload {
+  cashboxId: string;
+  type: TransactionType; // 'in' | 'out' strictly
+  amount: number;
+  description?: string;
+  createdBy: string;
+}
+
+export interface TransferPayload {
+  sourceCashboxId: string;
+  destCashboxId: string;
+  amount: number;
+  description?: string;
+  createdBy: string;
+}
+
+interface TransactionStore {
+  transactions: CashboxTransaction[];
+  isLoading: boolean;
   error: string | null;
-  currentCashboxId: string | null;
-
-  // الدوال
   fetchLedger: (cashboxId: string) => Promise<void>;
-  addManualTransaction: (params: ManualTransactionParams) => Promise<void>;
-  addTransfer: (params: TransferParams) => Promise<void>;
-  reverseTx: (params: ReverseTransactionParams) => Promise<void>;
-  reverseTransferTx: (params: ReverseTransferParams) => Promise<void>;
+  executeManualTransaction: (payload: ManualTransactionPayload) => Promise<void>;
+  executeTransfer: (payload: TransferPayload) => Promise<void>;
+  reverseTx: (transactionId: string, createdBy: string) => Promise<void>;
   clearTransactions: () => void;
 }
 
-export const useTransactionStore = create<TransactionState>((set, get) => ({
+export const useTransactionStore = create<TransactionStore>((set, get) => ({
   transactions: [],
-  loading: false,
+  isLoading: false,
   error: null,
-  currentCashboxId: null,
-
+  
   fetchLedger: async (cashboxId: string) => {
-    const { currentCashboxId } = get();
-    
-    // إذا تم تغيير الخزينة، نفرغ الحركات القديمة فوراً لمنع التداخل البصري
-    if (currentCashboxId !== cashboxId) {
-      set({ transactions: [], currentCashboxId: cashboxId });
-    }
-
-    set({ loading: true, error: null });
-    
+    set({ isLoading: true, error: null });
     try {
       const data = await getCashboxLedger(cashboxId);
-      set({ transactions: data, loading: false });
-    } catch (err: any) {
-      console.error(err);
-      set({ error: err.message || 'فشل في تحميل كشف حساب الخزينة', loading: false });
+      set({ transactions: data, isLoading: false });
+    } catch (error: any) {
+      set({ error: error.message, isLoading: false, transactions: [] });
     }
   },
 
-  addManualTransaction: async (params) => {
-    set({ loading: true, error: null });
+  executeManualTransaction: async (payload: ManualTransactionPayload) => {
+    set({ isLoading: true, error: null });
     try {
-      await processManualTransaction(params);
-      
-      const { currentCashboxId } = get();
-      if (currentCashboxId === params.cashboxId) {
-        await get().fetchLedger(params.cashboxId);
+      if (payload.type !== 'in' && payload.type !== 'out') {
+        throw new Error("نوع العملية غير صالح. يجب أن يكون 'in' أو 'out'.");
       }
       
-      await useCashboxStore.getState().fetchCashboxes();
-      
-      set({ loading: false });
-    } catch (err: any) {
-      console.error(err);
-      set({ error: err.message || 'فشل في تنفيذ الحركة', loading: false });
-      throw err; 
-    }
-  },
-
-  addTransfer: async (params) => {
-    set({ loading: true, error: null });
-    try {
-      await processTransfer(params);
-      
-      const { currentCashboxId } = get();
-      if (currentCashboxId === params.sourceCashboxId || currentCashboxId === params.destinationCashboxId) {
-        await get().fetchLedger(currentCashboxId);
+      if (!Number.isFinite(payload.amount) || payload.amount <= 0) {
+        throw new Error("يجب إدخال مبلغ صحيح أكبر من الصفر");
       }
-      
-      await useCashboxStore.getState().fetchCashboxes();
-      
-      set({ loading: false });
-    } catch (err: any) {
-      console.error(err);
-      set({ error: err.message || 'فشل في تنفيذ التحويل', loading: false });
-      throw err;
+
+      await processManualTransaction({
+        cashboxId: payload.cashboxId,
+        type: payload.type,
+        amount: payload.amount,
+        description: payload.description || '',
+        createdBy: payload.createdBy,
+        referenceType: 'manual'
+      });
+
+      await get().fetchLedger(payload.cashboxId);
+    } catch (error: any) {
+      set({ error: error.message, isLoading: false });
+      throw error;
+    } finally {
+      set({ isLoading: false });
     }
   },
 
-  reverseTx: async (params) => {
-    set({ loading: true, error: null });
+  executeTransfer: async (payload: TransferPayload) => {
+    set({ isLoading: true, error: null });
     try {
-      await reverseTransaction(params);
-      
-      const { currentCashboxId } = get();
-      if (currentCashboxId) {
-        await get().fetchLedger(currentCashboxId);
+      if (!payload.sourceCashboxId || !payload.destCashboxId) {
+        throw new Error("بيانات الخزينة المصدر أو المستقبل مفقودة");
       }
-      
-      await useCashboxStore.getState().fetchCashboxes();
-      
-      set({ loading: false });
-    } catch (err: any) {
-      console.error(err);
-      set({ error: err.message || 'فشل في إلغاء الحركة', loading: false });
-      throw err;
+
+      if (!Number.isFinite(payload.amount) || payload.amount <= 0) {
+        throw new Error("يجب إدخال مبلغ صحيح للتحويل");
+      }
+
+      await processTransfer({
+        sourceCashboxId: payload.sourceCashboxId,
+        destCashboxId: payload.destCashboxId,
+        amount: payload.amount,
+        description: payload.description || '',
+        createdBy: payload.createdBy
+      });
+
+      await get().fetchLedger(payload.sourceCashboxId);
+    } catch (error: any) {
+      set({ error: error.message, isLoading: false });
+      throw error;
+    } finally {
+      set({ isLoading: false });
     }
   },
 
-  // الدالة الجديدة للتحويل العكسي
-  reverseTransferTx: async (params) => {
-    set({ loading: true, error: null });
+  reverseTx: async (transactionId: string, createdBy: string) => {
+    set({ isLoading: true, error: null });
     try {
-      await reverseTransfer(params);
-      
-      const { currentCashboxId } = get();
-      if (currentCashboxId) {
-        await get().fetchLedger(currentCashboxId);
-      }
-      
-      await useCashboxStore.getState().fetchCashboxes();
-      
-      set({ loading: false });
-    } catch (err: any) {
-      console.error(err);
-      set({ error: err.message || 'فشل في إلغاء التحويل', loading: false });
-      throw err;
+      await reverseTransaction(transactionId, createdBy);
+      // ملاحظة: لا نستدعي fetchLedger هنا مباشرة لأننا لا نملك cashboxId في سياق هذه الدالة، 
+      // يجب على الواجهة (UI) استدعاء fetchLedger بعد نجاح الإلغاء.
+    } catch (error: any) {
+      set({ error: error.message, isLoading: false });
+      throw error;
+    } finally {
+      set({ isLoading: false });
     }
   },
 
-  clearTransactions: () => {
-    set({ transactions: [], loading: false, error: null, currentCashboxId: null });
-  },
+  clearTransactions: () => set({ transactions: [], error: null })
 }));
