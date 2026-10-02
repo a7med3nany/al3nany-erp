@@ -2,7 +2,7 @@ import { useEffect, useState, useMemo } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
-import { Loader2, Plus, Edit, Trash2, Package, X, CheckCircle2, XCircle, AlertCircle, Search, Filter } from "lucide-react";
+import { Loader2, Plus, Edit, Trash2, Package, X, CheckCircle2, XCircle, AlertCircle, Search, Filter, Wallet } from "lucide-react";
 import { useProductStore } from "../../store/productStore";
 import { useCategoryStore } from "../../store/categoryStore";
 import { Product } from "../../types";
