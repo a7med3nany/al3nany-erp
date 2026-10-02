@@ -5,9 +5,11 @@ import {
   processManualTransaction, 
   processTransfer, 
   reverseTransaction,
+  reverseTransfer,
   ManualTransactionParams,
   TransferParams,
-  ReverseTransactionParams
+  ReverseTransactionParams,
+  ReverseTransferParams
 } from '../services/transactionService';
 import { useCashboxStore } from './cashboxStore';
 
@@ -22,6 +24,7 @@ interface TransactionState {
   addManualTransaction: (params: ManualTransactionParams) => Promise<void>;
   addTransfer: (params: TransferParams) => Promise<void>;
   reverseTx: (params: ReverseTransactionParams) => Promise<void>;
+  reverseTransferTx: (params: ReverseTransferParams) => Promise<void>;
   clearTransactions: () => void;
 }
 
@@ -34,7 +37,7 @@ export const useTransactionStore = create<TransactionState>((set, get) => ({
   fetchLedger: async (cashboxId: string) => {
     const { currentCashboxId } = get();
     
-    // إذا تم تغيير الخزينة، نفرغ الحركات القديمة فوراً لمنع عرض بيانات خزينة أخرى أثناء التحميل
+    // إذا تم تغيير الخزينة، نفرغ الحركات القديمة فوراً لمنع التداخل البصري
     if (currentCashboxId !== cashboxId) {
       set({ transactions: [], currentCashboxId: cashboxId });
     }
@@ -55,20 +58,18 @@ export const useTransactionStore = create<TransactionState>((set, get) => ({
     try {
       await processManualTransaction(params);
       
-      // تحديث كشف الحساب الحالي إذا كنا نعرض نفس الخزينة المتأثرة
       const { currentCashboxId } = get();
       if (currentCashboxId === params.cashboxId) {
         await get().fetchLedger(params.cashboxId);
       }
       
-      // توجيه أمر لمتجر الخزائن لإعادة جلب الأرصدة المحدثة
       await useCashboxStore.getState().fetchCashboxes();
       
       set({ loading: false });
     } catch (err: any) {
       console.error(err);
       set({ error: err.message || 'فشل في تنفيذ الحركة', loading: false });
-      throw err; // نعيد رمي الخطأ لتتمكن الواجهة (UI) من التقاطه وعدم إغلاق النافذة
+      throw err; 
     }
   },
 
@@ -77,13 +78,11 @@ export const useTransactionStore = create<TransactionState>((set, get) => ({
     try {
       await processTransfer(params);
       
-      // تحديث كشف الحساب إذا كنا نعرض الخزينة المصدر أو المستقبلة
       const { currentCashboxId } = get();
       if (currentCashboxId === params.sourceCashboxId || currentCashboxId === params.destinationCashboxId) {
         await get().fetchLedger(currentCashboxId);
       }
       
-      // توجيه أمر لمتجر الخزائن لإعادة جلب الأرصدة المحدثة للخزنتين المتأثرتين
       await useCashboxStore.getState().fetchCashboxes();
       
       set({ loading: false });
@@ -99,19 +98,38 @@ export const useTransactionStore = create<TransactionState>((set, get) => ({
     try {
       await reverseTransaction(params);
       
-      // تحديث كشف الحساب الحالي
       const { currentCashboxId } = get();
       if (currentCashboxId) {
         await get().fetchLedger(currentCashboxId);
       }
       
-      // توجيه أمر لمتجر الخزائن لإعادة جلب الأرصدة المحدثة
       await useCashboxStore.getState().fetchCashboxes();
       
       set({ loading: false });
     } catch (err: any) {
       console.error(err);
       set({ error: err.message || 'فشل في إلغاء الحركة', loading: false });
+      throw err;
+    }
+  },
+
+  // الدالة الجديدة للتحويل العكسي
+  reverseTransferTx: async (params) => {
+    set({ loading: true, error: null });
+    try {
+      await reverseTransfer(params);
+      
+      const { currentCashboxId } = get();
+      if (currentCashboxId) {
+        await get().fetchLedger(currentCashboxId);
+      }
+      
+      await useCashboxStore.getState().fetchCashboxes();
+      
+      set({ loading: false });
+    } catch (err: any) {
+      console.error(err);
+      set({ error: err.message || 'فشل في إلغاء التحويل', loading: false });
       throw err;
     }
   },
