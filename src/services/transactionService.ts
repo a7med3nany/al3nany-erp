@@ -35,7 +35,7 @@ const validateAmount = (val: number) => {
 // 1. Transaction-Aware Internal Functions
 // ==========================================
 
-export const processTransactionInTransaction = async (
+export const processManualTransactionInTransaction = async (
   transaction: FirestoreTransaction,
   params: TransactionOperationParams
 ): Promise<void> => {
@@ -189,9 +189,9 @@ export const processTransferInTransaction = async (
 // 2. Public Wrappers (Phase 1 Compatibility)
 // ==========================================
 
-export const processTransaction = async (params: TransactionOperationParams): Promise<void> => {
+export const processManualTransaction = async (params: TransactionOperationParams): Promise<void> => {
   await runTransaction(db, async (transaction) => {
-    await processTransactionInTransaction(transaction, params);
+    await processManualTransactionInTransaction(transaction, params);
   });
 };
 
@@ -205,7 +205,7 @@ export const processTransfer = async (params: TransferOperationParams): Promise<
 // 3. Read-Only Public Functions
 // ==========================================
 
-export const getCashboxTransactions = async (cashboxId: string): Promise<CashboxTransaction[]> => {
+export const getCashboxLedger = async (cashboxId: string): Promise<CashboxTransaction[]> => {
   const q = query(
     collection(db, TRANSACTIONS_COLLECTION),
     where('cashboxId', '==', cashboxId),
