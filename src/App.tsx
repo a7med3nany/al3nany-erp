@@ -12,6 +12,7 @@ import Warehouses from "./pages/master-data/Warehouses";
 import Cashboxes from "./pages/master-data/Cashboxes";
 import CashboxDetails from "./pages/master-data/CashboxDetails";
 import Categories from "./pages/master-data/Categories";
+import Products from "./pages/master-data/Products";
 
 // تهيئة عميل React Query لإدارة استدعاءات البيانات
 const queryClient = new QueryClient();
@@ -53,10 +54,11 @@ function App() {
               {/* شاشات البيانات الأساسية (Master Data) */}
               <Route path="warehouses" element={<Warehouses />} />
               <Route path="categories" element={<Categories />} />
+              <Route path="products" element={<Products />} />
               <Route path="cashboxes" element={<Cashboxes />} />
               <Route path="cashboxes/:id" element={<CashboxDetails />} />
               
-              {/* سيتم إضافة شاشات (الأصناف، الفواتير) هنا تباعاً */}
+              {/* سيتم إضافة شاشات (الفواتير) هنا تباعاً */}
             </Route>
           </Route>
 
