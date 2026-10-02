@@ -27,9 +27,14 @@ export interface ReverseTransactionParams {
   createdBy: string;
 }
 
+export interface ReverseTransferParams {
+  transferId: string;
+  reason: string;
+  createdBy: string;
+}
+
 // 1. تنفيذ حركة يدوية (إيداع أو سحب)
 export const processManualTransaction = async (params: ManualTransactionParams): Promise<void> => {
-  // التحقق من صحة المبلغ والوصف
   if (!Number.isFinite(params.amount) || params.amount <= 0) {
     throw new Error('يجب أن يكون المبلغ رقماً صالحاً وأكبر من صفر');
   }
@@ -45,19 +50,17 @@ export const processManualTransaction = async (params: ManualTransactionParams):
     if (!cashboxDoc.exists()) throw new Error('الخزينة غير موجودة');
 
     const cashboxData = cashboxDoc.data();
-    if (!cashboxData.isActive) throw new Error('لا يمكن تنفيذ حركة مالية على خزينة معطلة');
+    // يمنع الإيداع أو السحب الجديد إذا كانت الخزينة معطلة
+    if (!cashboxData.isActive) throw new Error('لا يمكن تنفيذ حركة مالية جديدة على خزينة معطلة');
 
     const currentBalance = cashboxData.balance || 0;
 
-    // منع الرصيد السالب في حالة السحب
     if (params.type === 'withdraw' && params.amount > currentBalance) {
       throw new Error('الرصيد الحالي غير كافٍ لإتمام عملية السحب');
     }
 
     const flow: TransactionFlow = params.type === 'deposit' ? 'in' : 'out';
     const newBalance = flow === 'in' ? currentBalance + params.amount : currentBalance - params.amount;
-    
-    // توحيد التوقيت لكل عمليات الدالة
     const now = Timestamp.now();
 
     const transactionData: Omit<FinancialTransaction, 'id'> = {
@@ -81,7 +84,6 @@ export const processManualTransaction = async (params: ManualTransactionParams):
 
 // 2. تنفيذ تحويل بين خزنتين (Transfer)
 export const processTransfer = async (params: TransferParams): Promise<void> => {
-  // التحقق من صحة المبلغ
   if (!Number.isFinite(params.amount) || params.amount <= 0) {
     throw new Error('يجب أن يكون مبلغ التحويل رقماً صالحاً وأكبر من صفر');
   }
@@ -106,24 +108,21 @@ export const processTransfer = async (params: TransferParams): Promise<void> => 
     const sourceData = sourceDoc.data();
     const destData = destDoc.data();
 
+    // يمنع التحويل الجديد إذا كان أحد الأطراف معطلاً
     if (!sourceData.isActive) throw new Error('الخزينة المصدر معطلة');
     if (!destData.isActive) throw new Error('الخزينة المستقبلة معطلة');
 
     const sourceCurrentBalance = sourceData.balance || 0;
     const destCurrentBalance = destData.balance || 0;
 
-    // منع الرصيد السالب في الخزينة المصدر
     if (params.amount > sourceCurrentBalance) {
       throw new Error('رصيد الخزينة المصدر غير كافٍ لإتمام التحويل');
     }
 
     const sourceNewBalance = sourceCurrentBalance - params.amount;
     const destNewBalance = destCurrentBalance + params.amount;
-    
-    // توحيد التوقيت
     const now = Timestamp.now();
 
-    // معالجة الوصف (إذا لم يكتب المستخدم وصفاً، نستخدم الافتراضي)
     const outDescription = params.description?.trim() || `تحويل صادر إلى: ${destData.name}`;
     const inDescription = params.description?.trim() || `تحويل وارد من: ${sourceData.name}`;
 
@@ -136,6 +135,8 @@ export const processTransfer = async (params: TransferParams): Promise<void> => 
       referenceType: 'transfer',
       referenceId: sharedTransferId,
       transferId: sharedTransferId,
+      counterpartCashboxId: params.destinationCashboxId,
+      counterpartCashboxName: destData.name,
       description: outDescription,
       status: 'active',
       createdBy: params.createdBy,
@@ -152,6 +153,8 @@ export const processTransfer = async (params: TransferParams): Promise<void> => 
       referenceType: 'transfer',
       referenceId: sharedTransferId,
       transferId: sharedTransferId,
+      counterpartCashboxId: params.sourceCashboxId,
+      counterpartCashboxName: sourceData.name,
       description: inDescription,
       status: 'active',
       createdBy: params.createdBy,
@@ -167,12 +170,9 @@ export const processTransfer = async (params: TransferParams): Promise<void> => 
   });
 };
 
-// 3. إلغاء/عكس حركة مالية (Reverse Transaction)
+// 3. إلغاء/عكس حركة مالية يدوية (Reverse Transaction)
 export const reverseTransaction = async (params: ReverseTransactionParams): Promise<void> => {
-  // التحقق من صحة سبب الإلغاء
-  if (!params.reason?.trim()) {
-    throw new Error('يجب إدخال سبب لإلغاء أو تصحيح الحركة');
-  }
+  if (!params.reason?.trim()) throw new Error('يجب إدخال سبب لإلغاء أو تصحيح الحركة');
 
   const originalTxRef = doc(db, TRANSACTIONS_COLLECTION, params.originalTransactionId);
   const reverseTxRef = doc(collection(db, TRANSACTIONS_COLLECTION));
@@ -183,25 +183,22 @@ export const reverseTransaction = async (params: ReverseTransactionParams): Prom
     
     const originalTx = originalTxDoc.data() as FinancialTransaction;
 
-    // حمايات العكس
     if (originalTx.status === 'reversed') throw new Error('لا يمكن عكس حركة تم إلغاؤها مسبقاً');
     if (originalTx.type === 'reverse') throw new Error('لا يمكن عكس حركة عكسية (تصحيحية)');
     if (originalTx.type === 'transfer_in' || originalTx.type === 'transfer_out') {
-      throw new Error('لا يمكن عكس حركة تحويل منفردة. يرجى إنشاء تحويل عكسي بين الخزنتين.');
+      throw new Error('لا يمكن عكس حركة تحويل منفردة. يرجى استخدام التحويل العكسي.');
     }
 
     const cashboxRef = doc(db, CASHBOXES_COLLECTION, originalTx.cashboxId);
     const cashboxDoc = await transaction.get(cashboxRef);
     
     if (!cashboxDoc.exists()) throw new Error('الخزينة المرتبطة غير موجودة');
-    if (!cashboxDoc.data().isActive) throw new Error('لا يمكن تصحيح حركة لخزينة معطلة');
-
-    const currentBalance = cashboxDoc.data().balance || 0;
     
-    // إذا كانت الحركة الأصلية دخول، فالعكس خروج (والعكس صحيح)
+    // ملاحظة محاسبية: لا نتحقق هنا من isActive لأننا نسمح بتصحيح العمليات حتى للخزائن المعطلة
+    
+    const currentBalance = cashboxDoc.data().balance || 0;
     const reverseFlow: TransactionFlow = originalTx.flow === 'in' ? 'out' : 'in';
 
-    // منع الرصيد السالب إذا كان التصحيح سيؤدي لسحب نقود
     if (reverseFlow === 'out' && originalTx.amount > currentBalance) {
       throw new Error('الرصيد الحالي للخزينة غير كافٍ لعكس هذه الحركة (سيؤدي لرصيد سالب)');
     }
@@ -209,7 +206,6 @@ export const reverseTransaction = async (params: ReverseTransactionParams): Prom
     const newBalance = reverseFlow === 'in' 
       ? currentBalance + originalTx.amount 
       : currentBalance - originalTx.amount;
-
     const now = Timestamp.now();
 
     const reverseTxData: Omit<FinancialTransaction, 'id'> = {
@@ -227,22 +223,130 @@ export const reverseTransaction = async (params: ReverseTransactionParams): Prom
       updatedAt: now as unknown as Date,
     };
 
-    // 1. إنشاء الحركة التصحيحية
     transaction.set(reverseTxRef, reverseTxData);
-    
-    // 2. تحديث الحركة الأصلية (تغيير الحالة فقط وتوثيق من عكسها)
-    transaction.update(originalTxRef, { 
-      status: 'reversed',
-      reversedByTransactionId: reverseTxRef.id,
-      updatedAt: now
-    });
-
-    // 3. تحديث الكاش الخاص بالرصيد في الخزينة
+    transaction.update(originalTxRef, { status: 'reversed', reversedByTransactionId: reverseTxRef.id, updatedAt: now });
     transaction.update(cashboxRef, { balance: newBalance, updatedAt: now });
   });
 };
 
-// 4. جلب كشف حساب لخزينة معينة
+// 4. التحويل العكسي (Atomic Transfer Reversal)
+export const reverseTransfer = async (params: ReverseTransferParams): Promise<void> => {
+  if (!params.reason?.trim()) throw new Error('يجب إدخال سبب لإلغاء التحويل');
+
+  // الاستعلام المسبق لجلب الحركتين المرتبطتين بنفس التحويل
+  const q = query(
+    collection(db, TRANSACTIONS_COLLECTION),
+    where('transferId', '==', params.transferId),
+    where('referenceType', '==', 'transfer'),
+    where('status', '==', 'active')
+  );
+  const snapshot = await getDocs(q);
+
+  if (snapshot.size !== 2) {
+    throw new Error('لا يمكن عكس هذا التحويل، إما أنه تم إلغاؤه مسبقاً أو بياناته غير مكتملة.');
+  }
+
+  const docRef1 = doc(db, TRANSACTIONS_COLLECTION, snapshot.docs[0].id);
+  const docRef2 = doc(db, TRANSACTIONS_COLLECTION, snapshot.docs[1].id);
+
+  await runTransaction(db, async (transaction) => {
+    // 1. قراءة بيانات الحركتين الأصلية بشكل متزامن
+    const txDoc1 = await transaction.get(docRef1);
+    const txDoc2 = await transaction.get(docRef2);
+
+    if (!txDoc1.exists() || !txDoc2.exists()) throw new Error('أحد حركات التحويل غير موجودة');
+
+    const tx1 = txDoc1.data() as FinancialTransaction;
+    const tx2 = txDoc2.data() as FinancialTransaction;
+
+    if (tx1.status === 'reversed' || tx2.status === 'reversed') throw new Error('تم عكس هذا التحويل مسبقاً');
+
+    // تصنيف الحركات (أيها الدخول وأيها الخروج)
+    const transferOutDoc = tx1.type === 'transfer_out' ? txDoc1 : (tx2.type === 'transfer_out' ? txDoc2 : null);
+    const transferInDoc = tx1.type === 'transfer_in' ? txDoc1 : (tx2.type === 'transfer_in' ? txDoc2 : null);
+
+    if (!transferOutDoc || !transferInDoc) throw new Error('بيانات التحويل غير صالحة ولا تحتوي على طرفي النقل');
+
+    const transferOutData = transferOutDoc.data() as FinancialTransaction;
+    const transferInData = transferInDoc.data() as FinancialTransaction;
+
+    // 2. قراءة بيانات الخزائن الأصلية
+    const originalSourceRef = doc(db, CASHBOXES_COLLECTION, transferOutData.cashboxId);
+    const originalDestRef = doc(db, CASHBOXES_COLLECTION, transferInData.cashboxId);
+
+    const sourceDoc = await transaction.get(originalSourceRef);
+    const destDoc = await transaction.get(originalDestRef);
+
+    if (!sourceDoc.exists()) throw new Error('الخزينة المصدر الأساسية غير موجودة');
+    if (!destDoc.exists()) throw new Error('الخزينة المستقبلة الأساسية غير موجودة');
+
+    // ملاحظة: لا نفحص isActive هنا لضمان إمكانية التصحيح دائماً
+    
+    const sourceBalance = sourceDoc.data().balance || 0;
+    const destBalance = destDoc.data().balance || 0;
+
+    // الخزينة المستقبلة (التي زاد رصيدها سابقاً) يجب أن تملك رصيداً كافياً الآن لسحب المبلغ وإرجاعه
+    if (destBalance < transferInData.amount) {
+      throw new Error(`رصيد خزينة "${destDoc.data().name}" غير كافٍ لاسترداد مبلغ التحويل.`);
+    }
+
+    const newSourceBalance = sourceBalance + transferOutData.amount;
+    const newDestBalance = destBalance - transferInData.amount;
+    const now = Timestamp.now();
+
+    // 3. تجهيز بيانات الحركات العكسية
+    const reverseInRef = doc(collection(db, TRANSACTIONS_COLLECTION)); // حركة دخول لرد الفلوس للمصدر الأساسي
+    const reverseOutRef = doc(collection(db, TRANSACTIONS_COLLECTION)); // حركة خروج لسحب الفلوس من المستقبل الأساسي
+
+    const reverseInTx: Omit<FinancialTransaction, 'id'> = {
+      cashboxId: originalSourceRef.id,
+      type: 'reverse',
+      flow: 'in',
+      amount: transferOutData.amount,
+      balanceAfter: newSourceBalance,
+      referenceType: 'correction',
+      referenceId: transferOutDoc.id, // الإشارة لمعرف حركة الخروج الأصلية
+      transferId: params.transferId,  // الاحتفاظ برقم التحويل الموحد
+      counterpartCashboxId: originalDestRef.id,
+      counterpartCashboxName: destDoc.data().name,
+      description: `إلغاء تحويل صادر سابق: ${params.reason.trim()}`,
+      status: 'active',
+      createdBy: params.createdBy,
+      createdAt: now as unknown as Date,
+      updatedAt: now as unknown as Date,
+    };
+
+    const reverseOutTx: Omit<FinancialTransaction, 'id'> = {
+      cashboxId: originalDestRef.id,
+      type: 'reverse',
+      flow: 'out',
+      amount: transferInData.amount,
+      balanceAfter: newDestBalance,
+      referenceType: 'correction',
+      referenceId: transferInDoc.id, // الإشارة لمعرف حركة الدخول الأصلية
+      transferId: params.transferId,
+      counterpartCashboxId: originalSourceRef.id,
+      counterpartCashboxName: sourceDoc.data().name,
+      description: `إلغاء تحويل وارد سابق: ${params.reason.trim()}`,
+      status: 'active',
+      createdBy: params.createdBy,
+      createdAt: now as unknown as Date,
+      updatedAt: now as unknown as Date,
+    };
+
+    // 4. تنفيذ العمليات بشكل متزامن
+    transaction.set(reverseInRef, reverseInTx);
+    transaction.set(reverseOutRef, reverseOutTx);
+    
+    transaction.update(transferOutDoc.ref, { status: 'reversed', reversedByTransactionId: reverseInRef.id, updatedAt: now });
+    transaction.update(transferInDoc.ref, { status: 'reversed', reversedByTransactionId: reverseOutRef.id, updatedAt: now });
+    
+    transaction.update(originalSourceRef, { balance: newSourceBalance, updatedAt: now });
+    transaction.update(originalDestRef, { balance: newDestBalance, updatedAt: now });
+  });
+};
+
+// 5. جلب كشف حساب لخزينة معينة
 export const getCashboxLedger = async (cashboxId: string): Promise<FinancialTransaction[]> => {
   try {
     const q = query(
