@@ -1,565 +1,509 @@
-import { useEffect, useState, useMemo } from "react";
-import { useParams, useNavigate } from "react-router-dom";
-import { useForm } from "react-hook-form";
-import { zodResolver } from "@hookform/resolvers/zod";
-import * as z from "zod";
+import { useEffect, useState, useMemo } from 'react';
+import { useParams, useNavigate, Link } from 'react-router-dom';
 import { 
-  ArrowRight, ArrowDownToLine, ArrowUpFromLine, ArrowRightLeft, 
-  Undo2, Loader2, FileText, CheckCircle2, XCircle, AlertCircle, 
-  Search, Filter, Eye, Calendar, User, Hash, Info
-} from "lucide-react";
-import { useCashboxStore } from "../../store/cashboxStore";
-import { useTransactionStore } from "../../store/transactionStore";
-import { useAuthStore } from "../../store/authStore";
-import { FinancialTransaction, TransactionType, TransactionStatus } from "../../types";
+  ArrowRight, ArrowUpRight, ArrowDownLeft, ArrowLeftRight, 
+  Wallet, Search, Filter, AlertCircle, Loader2, RotateCcw,
+  PlusCircle, MinusCircle, FileText
+} from 'lucide-react';
+import { useCashboxStore } from '../../store/cashboxStore';
+import { useTransactionStore } from '../../store/transactionStore';
+import { CashboxTransaction } from '../../types';
 
-// -------------------------------------------------------------------
-// مخططات التحقق (Zod Schemas)
-// -------------------------------------------------------------------
-const manualSchema = z.object({
-  amount: z.coerce.number().positive("يجب أن يكون المبلغ أكبر من صفر"),
-  description: z.string().min(2, "يرجى كتابة سبب أو وصف واضح للحركة").trim(),
-});
-
-const transferSchema = z.object({
-  destinationId: z.string().min(1, "يرجى اختيار الخزينة المستقبلة"),
-  amount: z.coerce.number().positive("يجب أن يكون المبلغ أكبر من صفر"),
-  description: z.string().optional(),
-});
-
-const reverseSchema = z.object({
-  reason: z.string().min(2, "يرجى كتابة سبب الإلغاء أو التصحيح").trim(),
-});
-
-// -------------------------------------------------------------------
-// قواميس الترجمة والتنسيق
-// -------------------------------------------------------------------
-const txTypeLabels: Record<TransactionType, string> = {
-  deposit: "إيداع نقدي",
-  withdraw: "سحب نقدي",
-  transfer_in: "تحويل وارد",
-  transfer_out: "تحويل صادر",
-  customer_receipt: "قبض من عميل",
-  supplier_payment: "دفع لمورد",
-  expense: "مصروفات",
-  sales_return: "مرتجع مبيعات",
-  purchase_return: "مرتجع مشتريات",
-  reverse: "حركة تصحيحية",
-};
-
-const formatCurrency = (amount: number) => {
-  return new Intl.NumberFormat("ar-EG", { style: "currency", currency: "EGP" }).format(amount);
-};
-
-const formatDate = (date: Date) => {
-  return new Intl.DateTimeFormat("ar-EG", {
-    year: "numeric", month: "short", day: "numeric",
-    hour: "2-digit", minute: "2-digit", hour12: true
-  }).format(date);
-};
-
-// -------------------------------------------------------------------
-// المكون الرئيسي
-// -------------------------------------------------------------------
 export default function CashboxDetails() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { user } = useAuthStore();
   
   const { cashboxes, fetchCashboxes } = useCashboxStore();
   const { 
-    transactions, loading: txLoading, error: txError, 
-    fetchLedger, addManualTransaction, addTransfer, reverseTx, reverseTransferTx, clearTransactions 
+    transactions, 
+    isLoading: isTxLoading, 
+    error: txError, 
+    fetchLedger, 
+    executeManualTransaction, 
+    executeTransfer,
+    reverseTx
   } = useTransactionStore();
-
-  // حالة النوافذ المنبثقة
-  const [modalType, setModalType] = useState<'deposit' | 'withdraw' | 'transfer' | 'reverse_manual' | 'reverse_transfer' | 'details' | null>(null);
-  const [selectedTx, setSelectedTx] = useState<FinancialTransaction | null>(null);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-
-  // حالة الفلاتر
-  const [searchTerm, setSearchTerm] = useState("");
-  const [filterType, setFilterType] = useState<string>("");
-  const [filterStatus, setFilterStatus] = useState<string>("");
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
-
-  // جلب البيانات الأساسية
-  useEffect(() => {
-    if (cashboxes.length === 0) fetchCashboxes();
-    if (id) fetchLedger(id);
-    return () => clearTransactions();
-  }, [id, fetchCashboxes, fetchLedger, clearTransactions, cashboxes.length]);
 
   const cashbox = cashboxes.find(c => c.id === id);
 
-  // -------------------------------------------------------------------
-  // الفلترة الديناميكية وحساب الإجماليات
-  // -------------------------------------------------------------------
+  // States for Modals
+  const [isManualModalOpen, setIsManualModalOpen] = useState(false);
+  const [manualType, setManualType] = useState<'in' | 'out'>('in');
+  
+  const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
+  const [isReverseModalOpen, setIsReverseModalOpen] = useState(false);
+  const [txToReverse, setTxToReverse] = useState<CashboxTransaction | null>(null);
+
+  // Form States
+  const [amount, setAmount] = useState<string>('');
+  const [description, setDescription] = useState<string>('');
+  const [destCashboxId, setDestCashboxId] = useState<string>('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  // Filters
+  const [searchTerm, setSearchTerm] = useState('');
+  const [filterType, setFilterType] = useState<string>('');
+
+  useEffect(() => {
+    if (id) {
+      fetchCashboxes(); // Refresh cashboxes to get latest balance
+      fetchLedger(id);
+    }
+  }, [id, fetchCashboxes, fetchLedger]);
+
   const filteredTransactions = useMemo(() => {
     return transactions.filter(tx => {
-      // بحث نصي
-      const searchLower = searchTerm.toLowerCase();
-      const matchSearch = 
-        tx.description.toLowerCase().includes(searchLower) ||
-        tx.referenceId?.toLowerCase().includes(searchLower) ||
-        tx.counterpartCashboxName?.toLowerCase().includes(searchLower);
-      
-      // فلاتر القوائم المنسدلة
+      const matchSearch = tx.description?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                          tx.referenceId?.toLowerCase().includes(searchTerm.toLowerCase());
       const matchType = filterType ? tx.type === filterType : true;
-      const matchStatus = filterStatus ? tx.status === filterStatus : true;
-      
-      // فلتر التاريخ
-      const txDate = new Date(tx.createdAt);
-      const from = dateFrom ? new Date(dateFrom) : null;
-      if (from) from.setHours(0, 0, 0, 0);
-      const to = dateTo ? new Date(dateTo) : null;
-      if (to) to.setHours(23, 59, 59, 999);
-      
-      const matchDateFrom = from ? txDate >= from : true;
-      const matchDateTo = to ? txDate <= to : true;
-
-      return matchSearch && matchType && matchStatus && matchDateFrom && matchDateTo;
+      return matchSearch && matchType;
     });
-  }, [transactions, searchTerm, filterType, filterStatus, dateFrom, dateTo]);
+  }, [transactions, searchTerm, filterType]);
 
-  // حساب الإجماليات للحركات الفعالة فقط (تستبعد الملغية reversed، وتشمل الحركات العكسية reverse)
-  const { totalIn, totalOut } = useMemo(() => {
-    let inSum = 0;
-    let outSum = 0;
-    filteredTransactions.forEach(tx => {
-      if (tx.status === 'reversed') return; // لا تدخل في الحسبة نهائياً
-      if (tx.flow === 'in') inSum += tx.amount;
-      if (tx.flow === 'out') outSum += tx.amount;
-    });
-    return { totalIn: inSum, totalOut: outSum };
-  }, [filteredTransactions]);
-
-  // -------------------------------------------------------------------
-  // إعداد النماذج (Forms)
-  // -------------------------------------------------------------------
-  const { register: registerManual, handleSubmit: handleManualSubmit, reset: resetManual, formState: { errors: manualErrors } } = useForm<z.infer<typeof manualSchema>>({ resolver: zodResolver(manualSchema) });
-  const { register: registerTransfer, handleSubmit: handleTransferSubmit, reset: resetTransfer, formState: { errors: transferErrors } } = useForm<z.infer<typeof transferSchema>>({ resolver: zodResolver(transferSchema) });
-  const { register: registerReverse, handleSubmit: handleReverseSubmit, reset: resetReverse, formState: { errors: reverseErrors } } = useForm<z.infer<typeof reverseSchema>>({ resolver: zodResolver(reverseSchema) });
-
-  const closeModals = () => {
-    setModalType(null);
-    setSelectedTx(null);
-    resetManual(); resetTransfer(); resetReverse();
+  const resetForms = () => {
+    setAmount('');
+    setDescription('');
+    setDestCashboxId('');
+    setActionError(null);
   };
 
-  // -------------------------------------------------------------------
-  // معالجات الإرسال (Submit Handlers)
-  // -------------------------------------------------------------------
-  const onManualSubmit = async (data: z.infer<typeof manualSchema>) => {
-    if (!id || !user?.email || (modalType !== 'deposit' && modalType !== 'withdraw')) return;
+  const handleOpenManual = (type: 'in' | 'out') => {
+    resetForms();
+    setManualType(type);
+    setIsManualModalOpen(true);
+  };
+
+  const handleOpenTransfer = () => {
+    resetForms();
+    setIsTransferModalOpen(true);
+  };
+
+  const handleOpenReverse = (tx: CashboxTransaction) => {
+    setActionError(null);
+    setTxToReverse(tx);
+    setIsReverseModalOpen(true);
+  };
+
+  const submitManualTransaction = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!id) return;
     setIsSubmitting(true);
+    setActionError(null);
     try {
-      await addManualTransaction({ cashboxId: id, type: modalType, amount: data.amount, description: data.description, createdBy: user.email });
-      closeModals();
-    } catch (err) { } finally { setIsSubmitting(false); }
+      await executeManualTransaction({
+        cashboxId: id,
+        type: manualType,
+        amount: Number(amount),
+        description: description,
+        createdBy: 'admin' // In a real app, get from auth context
+      });
+      fetchCashboxes(); // Refresh header balance
+      setIsManualModalOpen(false);
+    } catch (err: any) {
+      setActionError(err.message || 'حدث خطأ أثناء تنفيذ العملية');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
-  const onTransferSubmit = async (data: z.infer<typeof transferSchema>) => {
-    if (!id || !user?.email) return;
+  const submitTransfer = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!id) return;
     setIsSubmitting(true);
+    setActionError(null);
     try {
-      await addTransfer({ sourceCashboxId: id, destinationCashboxId: data.destinationId, amount: data.amount, description: data.description || "", createdBy: user.email });
-      closeModals();
-    } catch (err) { } finally { setIsSubmitting(false); }
+      await executeTransfer({
+        sourceCashboxId: id,
+        destCashboxId: destCashboxId,
+        amount: Number(amount),
+        description: description,
+        createdBy: 'admin'
+      });
+      fetchCashboxes(); // Refresh header balance
+      setIsTransferModalOpen(false);
+    } catch (err: any) {
+      setActionError(err.message || 'حدث خطأ أثناء التحويل');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
-  const onReverseSubmit = async (data: z.infer<typeof reverseSchema>) => {
-    if (!selectedTx || !user?.email) return;
+  const submitReverse = async () => {
+    if (!id || !txToReverse) return;
     setIsSubmitting(true);
+    setActionError(null);
     try {
-      if (modalType === 'reverse_manual') {
-        await reverseTx({ originalTransactionId: selectedTx.id, reason: data.reason, createdBy: user.email });
-      } else if (modalType === 'reverse_transfer' && selectedTx.transferId) {
-        await reverseTransferTx({ transferId: selectedTx.transferId, reason: data.reason, createdBy: user.email });
-      }
-      closeModals();
-    } catch (err) { } finally { setIsSubmitting(false); }
+      await reverseTx(txToReverse.id, 'admin');
+      await fetchLedger(id);
+      fetchCashboxes();
+      setIsReverseModalOpen(false);
+    } catch (err: any) {
+      setActionError(err.message || 'حدث خطأ أثناء الإلغاء');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
-  if (!cashbox) {
+  const translateRefType = (refType: string) => {
+    const map: Record<string, string> = {
+      'manual': 'حركة يدوية',
+      'transfer': 'تحويل مالي',
+      'opening_balance': 'رصيد افتتاحي',
+      'purchase_invoice': 'فاتورة مشتريات',
+      'purchase_return': 'مرتجع مشتريات',
+      'supplier_payment': 'سداد مورد',
+      'sales_invoice': 'فاتورة مبيعات',
+      'sales_return': 'مرتجع مبيعات',
+      'customer_receipt': 'مقبوضات عميل',
+      'expense': 'مصروفات'
+    };
+    return map[refType] || refType;
+  };
+
+  if (!cashbox && !isTxLoading) {
     return (
-      <div className="flex flex-col items-center justify-center h-64">
-        <Loader2 className="h-8 w-8 animate-spin text-primary mb-4" />
-        <p className="text-muted-foreground">جاري تحميل بيانات الخزينة...</p>
+      <div className="flex flex-col items-center justify-center p-12 text-muted-foreground bg-card rounded-xl border border-border shadow-sm">
+        <AlertCircle className="h-12 w-12 text-rose-500 mb-4" />
+        <h2 className="text-xl font-bold text-foreground">الخزينة غير موجودة</h2>
+        <Link to="/cashboxes" className="mt-4 text-primary hover:underline">العودة لقائمة الخزائن</Link>
       </div>
     );
   }
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500 pb-12">
-      {/* 1. رأس الشاشة */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div className="flex items-center gap-4">
-          <button onClick={() => navigate('/cashboxes')} className="p-2 bg-secondary/50 hover:bg-secondary text-secondary-foreground rounded-full transition-colors" title="العودة">
-            <ArrowRight className="h-5 w-5" />
-          </button>
-          <div>
-            <h1 className="text-2xl font-bold text-foreground flex items-center gap-2">
-              <FileText className="h-6 w-6 text-primary" /> كشف حساب: {cashbox.name}
-            </h1>
-            <p className="text-sm text-muted-foreground mt-1">الدفتر المالي وسجل الحركات</p>
+      {/* Header & Balance */}
+      <div className="bg-card p-6 rounded-xl border border-border shadow-sm">
+        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+          <div className="flex items-center gap-4">
+            <Link to="/cashboxes" className="p-2 bg-secondary/50 text-secondary-foreground rounded-full hover:bg-secondary transition-colors" title="العودة">
+              <ArrowRight className="h-5 w-5" />
+            </Link>
+            <div>
+              <h1 className="text-2xl font-bold text-primary flex items-center gap-2">
+                <Wallet className="h-6 w-6" /> {cashbox?.name || 'جاري التحميل...'}
+              </h1>
+              <p className="text-muted-foreground text-sm mt-1 flex items-center gap-1">
+                <FileText className="h-4 w-4" /> كشف حساب وسجل حركات الخزينة
+              </p>
+            </div>
           </div>
+          <div className="bg-primary/10 border border-primary/20 px-6 py-3 rounded-lg text-center md:text-left min-w-[200px]">
+            <p className="text-xs font-bold text-primary mb-1 uppercase tracking-wider">الرصيد الفعلي الحالي</p>
+            <p className="text-3xl font-black text-primary">
+              {Number(cashbox?.balance || 0).toLocaleString()} <span className="text-lg text-primary/70">{cashbox?.currency || 'ج.م'}</span>
+            </p>
+          </div>
+        </div>
+
+        {/* Action Buttons */}
+        <div className="flex flex-wrap gap-3 mt-6 pt-6 border-t border-border">
+          <button onClick={() => handleOpenManual('in')} className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2.5 rounded-md font-medium transition-colors shadow-sm">
+            <PlusCircle className="h-5 w-5" /> إيداع نقدي
+          </button>
+          <button onClick={() => handleOpenManual('out')} className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-rose-600 hover:bg-rose-700 text-white px-5 py-2.5 rounded-md font-medium transition-colors shadow-sm">
+            <MinusCircle className="h-5 w-5" /> سحب نقدي
+          </button>
+          <button onClick={handleOpenTransfer} className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-md font-medium transition-colors shadow-sm">
+            <ArrowLeftRight className="h-5 w-5" /> تحويل لخزينة أخرى
+          </button>
         </div>
       </div>
 
       {txError && (
-        <div className="bg-destructive/10 border border-destructive/20 text-destructive p-4 rounded-xl flex items-center gap-3">
+        <div className="bg-destructive/10 text-destructive border border-destructive/20 p-4 rounded-xl flex items-center gap-3 shadow-sm">
           <AlertCircle className="h-5 w-5 shrink-0" />
-          <p className="font-medium">{txError}</p>
+          <p>{txError}</p>
         </div>
       )}
 
-      {/* 2. شريط الإجراءات (Action Bar) */}
-      <div className="bg-card border border-border p-4 rounded-xl shadow-sm flex flex-wrap gap-3">
-        <button onClick={() => setModalType('deposit')} disabled={!cashbox.isActive} className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2.5 rounded-lg font-medium transition-colors disabled:opacity-50">
-          <ArrowDownToLine className="h-5 w-5" /> إيداع نقدي
-        </button>
-        <button onClick={() => setModalType('withdraw')} disabled={!cashbox.isActive} className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-rose-600 hover:bg-rose-700 text-white px-5 py-2.5 rounded-lg font-medium transition-colors disabled:opacity-50">
-          <ArrowUpFromLine className="h-5 w-5" /> سحب نقدي
-        </button>
-        <button onClick={() => setModalType('transfer')} disabled={!cashbox.isActive} className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-lg font-medium transition-colors disabled:opacity-50">
-          <ArrowRightLeft className="h-5 w-5" /> تحويل لخزينة أخرى
-        </button>
-      </div>
-
-      {/* 3. شريط الفلاتر (Filters) */}
+      {/* Filters */}
       <div className="bg-card border border-border p-4 rounded-xl shadow-sm space-y-4">
         <div className="flex items-center gap-2 text-primary font-bold">
-          <Filter className="h-5 w-5" /> فلاتر البحث
+          <Filter className="h-5 w-5" /> فلاتر البحث في السجل
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-3">
-          <div className="md:col-span-2 relative">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div className="relative">
             <Search className="absolute right-3 top-2.5 h-4 w-4 text-muted-foreground" />
-            <input type="text" placeholder="بحث بالبيان، المرجع، الخزينة..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="w-full pl-3 pr-9 py-2 bg-input border border-border rounded-md focus:ring-2 focus:ring-primary text-sm" />
+            <input 
+              type="text" 
+              placeholder="بحث بالوصف أو رقم المستند..." 
+              value={searchTerm} 
+              onChange={e => setSearchTerm(e.target.value)} 
+              className="w-full pl-3 pr-9 py-2 bg-input border border-border rounded-md focus:ring-2 focus:ring-primary text-sm" 
+            />
           </div>
-          <select value={filterType} onChange={e => setFilterType(e.target.value)} className="w-full px-3 py-2 bg-input border border-border rounded-md text-sm">
-            <option value="">كل الأنواع</option>
-            {Object.entries(txTypeLabels).map(([key, label]) => (
-              <option key={key} value={key}>{label}</option>
-            ))}
+          <select 
+            value={filterType} 
+            onChange={e => setFilterType(e.target.value)} 
+            className="w-full px-3 py-2 bg-input border border-border rounded-md text-sm"
+          >
+            <option value="">كل أنواع الحركات</option>
+            <option value="in">الوارد (إيداعات)</option>
+            <option value="out">الصادر (سحوبات)</option>
           </select>
-          <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="w-full px-3 py-2 bg-input border border-border rounded-md text-sm">
-            <option value="">كل الحالات</option>
-            <option value="active">معتمدة/فعالة</option>
-            <option value="reversed">ملغية/معكوسة</option>
-          </select>
-          <div className="flex gap-2">
-            <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)} className="w-full px-2 py-2 bg-input border border-border rounded-md text-sm" title="من تاريخ" />
-            <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)} className="w-full px-2 py-2 bg-input border border-border rounded-md text-sm" title="إلى تاريخ" />
-          </div>
         </div>
       </div>
 
-      {/* 4. بطاقات الملخص (Summaries based on filters) */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-primary/10 border border-primary/20 p-4 rounded-xl flex flex-col justify-center">
-          <p className="text-xs font-bold text-primary mb-1 uppercase tracking-wider">الرصيد الفعلي الحالي</p>
-          <p className="text-2xl font-bold text-primary font-mono" dir="ltr">{formatCurrency(cashbox.balance)}</p>
-        </div>
-        <div className="bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-100 dark:border-emerald-900/30 p-4 rounded-xl">
-          <p className="text-xs font-bold text-emerald-700 dark:text-emerald-400 mb-1 flex items-center gap-1">
-            <ArrowDownToLine className="h-3.5 w-3.5" /> إجمالي الداخل (بعد الفلترة)
-          </p>
-          <p className="text-xl font-bold text-emerald-700 dark:text-emerald-400 font-mono" dir="ltr">{formatCurrency(totalIn)}</p>
-        </div>
-        <div className="bg-rose-50 dark:bg-rose-950/20 border border-rose-100 dark:border-rose-900/30 p-4 rounded-xl">
-          <p className="text-xs font-bold text-rose-700 dark:text-rose-400 mb-1 flex items-center gap-1">
-            <ArrowUpFromLine className="h-3.5 w-3.5" /> إجمالي الخارج (بعد الفلترة)
-          </p>
-          <p className="text-xl font-bold text-rose-700 dark:text-rose-400 font-mono" dir="ltr">{formatCurrency(totalOut)}</p>
-        </div>
-        <div className="bg-secondary/30 border border-border p-4 rounded-xl">
-          <p className="text-xs font-bold text-muted-foreground mb-1">عدد الحركات (في الجدول)</p>
-          <p className="text-xl font-bold text-foreground font-mono" dir="ltr">{filteredTransactions.length} حركة</p>
-        </div>
-      </div>
-
-      {/* 5. كشف الحساب (Ledger Table) */}
+      {/* Ledger Table */}
       <div className="bg-card border border-border rounded-xl shadow-sm overflow-hidden">
-        <div className="p-4 border-b border-border bg-secondary/30 flex items-center justify-between">
-          <h2 className="font-bold text-foreground">الحركات المالية</h2>
-          {txLoading && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm text-right">
-            <thead className="bg-secondary/50 text-secondary-foreground">
-              <tr>
-                <th className="px-4 py-3 font-semibold whitespace-nowrap">التاريخ</th>
-                <th className="px-4 py-3 font-semibold">الحركة / التفاصيل</th>
-                <th className="px-4 py-3 font-semibold text-left">المبلغ</th>
-                <th className="px-4 py-3 font-semibold text-left">الرصيد بعد</th>
-                <th className="px-4 py-3 font-semibold">الحالة</th>
-                <th className="px-4 py-3 font-semibold w-24">إجراءات</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {filteredTransactions.map((tx) => {
-                const isReversed = tx.status === 'reversed';
-                
-                // تحديد عنوان التفاصيل (خصوصاً للتحويلات)
-                let detailTitle = tx.description;
-                if (tx.type === 'transfer_out' && tx.counterpartCashboxName) detailTitle = `إلى خزينة: ${tx.counterpartCashboxName}`;
-                if (tx.type === 'transfer_in' && tx.counterpartCashboxName) detailTitle = `من خزينة: ${tx.counterpartCashboxName}`;
-
-                return (
-                  <tr key={tx.id} className={`hover:bg-secondary/10 transition-colors ${isReversed ? 'opacity-60 bg-secondary/20' : ''}`}>
-                    <td className="px-4 py-3 whitespace-nowrap text-muted-foreground text-xs" dir="ltr">
-                      {formatDate(tx.createdAt)}
+        {isTxLoading ? (
+          <div className="flex flex-col items-center justify-center p-12 text-muted-foreground">
+            <Loader2 className="h-8 w-8 animate-spin mb-4 text-primary" />
+            <p>جاري تحميل كشف الحساب...</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm text-right">
+              <thead className="bg-secondary/50 text-secondary-foreground border-b border-border">
+                <tr>
+                  <th className="px-4 py-4 font-semibold">التاريخ</th>
+                  <th className="px-4 py-4 font-semibold">الحركة / التفاصيل</th>
+                  <th className="px-4 py-4 font-semibold text-center">المبلغ</th>
+                  <th className="px-4 py-4 font-semibold text-center">الرصيد بعد</th>
+                  <th className="px-4 py-4 font-semibold text-center w-24">إجراءات</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {filteredTransactions.map((tx) => (
+                  <tr key={tx.id} className="hover:bg-secondary/20 transition-colors">
+                    <td className="px-4 py-3 align-top whitespace-nowrap text-muted-foreground">
+                      <div className="font-medium text-foreground">{tx.createdAt?.toLocaleDateString('en-GB')}</div>
+                      <div className="text-xs">{tx.createdAt?.toLocaleTimeString('en-GB', { hour: '2-digit', minute:'2-digit' })}</div>
                     </td>
-                    <td className="px-4 py-3">
-                      <div className="flex flex-col gap-1">
-                        <span className={`w-fit inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold border ${
-                          tx.flow === 'in' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-rose-50 text-rose-700 border-rose-200'
-                        }`}>
-                          {txTypeLabels[tx.type]}
-                        </span>
-                        <span className={`font-medium max-w-[200px] sm:max-w-xs truncate ${isReversed ? 'line-through text-muted-foreground' : ''}`} title={tx.description}>
-                          {detailTitle}
+                    <td className="px-4 py-3 align-top">
+                      <div className="flex items-center gap-2 mb-1">
+                        {tx.type === 'in' ? (
+                          <span className="inline-flex items-center gap-1 text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded text-xs font-bold border border-emerald-200">
+                            <ArrowDownLeft className="h-3 w-3" /> وارد
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-rose-600 bg-rose-50 px-2 py-0.5 rounded text-xs font-bold border border-rose-200">
+                            <ArrowUpRight className="h-3 w-3" /> صادر
+                          </span>
+                        )}
+                        <span className="text-xs bg-secondary px-2 py-0.5 rounded font-medium text-secondary-foreground border border-border">
+                          {translateRefType(tx.referenceType)}
                         </span>
                       </div>
+                      <div className="text-foreground font-medium">{tx.description || '-'}</div>
+                      <div className="text-xs text-muted-foreground mt-0.5 font-mono text-left block w-fit" dir="ltr">#{tx.referenceId}</div>
                     </td>
-                    <td className="px-4 py-3 whitespace-nowrap font-mono font-bold text-left" dir="ltr">
-                      <span className={tx.flow === 'in' ? 'text-emerald-600' : 'text-rose-600'}>
-                        {tx.flow === 'in' ? '+' : '-'}{formatCurrency(tx.amount)}
+                    <td className="px-4 py-3 align-top text-center">
+                      <span className={`font-bold ${tx.type === 'in' ? 'text-emerald-600' : 'text-rose-600'}`}>
+                        {tx.type === 'in' ? '+' : '-'}{Number(tx.amount).toLocaleString()}
                       </span>
                     </td>
-                    <td className="px-4 py-3 whitespace-nowrap font-mono text-muted-foreground text-left" dir="ltr">
-                      {formatCurrency(tx.balanceAfter)}
+                    <td className="px-4 py-3 align-top text-center font-bold text-foreground">
+                      {Number(tx.balanceAfter).toLocaleString()}
                     </td>
-                    <td className="px-4 py-3">
-                      {tx.status === 'active' ? (
-                        <span className="flex items-center gap-1 text-emerald-600 text-xs font-bold"><CheckCircle2 className="h-3.5 w-3.5" /> معتمدة</span>
+                    <td className="px-4 py-3 align-top text-center">
+                      {tx.referenceType === 'transfer' ? (
+                        <span className="text-xs text-muted-foreground cursor-not-allowed" title="يجب عمل تحويل عكسي لإلغاء التحويل">لا يلغى مياشرة</span>
+                      ) : tx.referenceId.startsWith('rev_') ? (
+                        <span className="text-xs text-muted-foreground">حركة ملغاة</span>
                       ) : (
-                        <span className="flex items-center gap-1 text-destructive text-xs font-bold"><XCircle className="h-3.5 w-3.5" /> ملغية</span>
+                        <button 
+                          onClick={() => handleOpenReverse(tx)}
+                          className="text-rose-600 hover:text-rose-800 bg-rose-50 hover:bg-rose-100 p-1.5 rounded transition-colors w-full flex items-center justify-center"
+                          title="إلغاء الحركة"
+                        >
+                          <RotateCcw className="h-4 w-4" />
+                        </button>
                       )}
                     </td>
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-2">
-                        {/* زر التفاصيل (يعمل دائماً) */}
-                        <button onClick={() => { setSelectedTx(tx); setModalType('details'); }} className="text-primary hover:text-primary/80 bg-primary/10 hover:bg-primary/20 p-1.5 rounded transition-colors" title="عرض التفاصيل">
-                          <Eye className="h-4 w-4" />
-                        </button>
-                        
-                        {/* أزرار الإلغاء (تعمل للحركات الفعالة فقط) */}
-                        {tx.status === 'active' && (
-                          <>
-                            {/* إلغاء حركة يدوية (إيداع/سحب) */}
-                            {['deposit', 'withdraw'].includes(tx.type) && (
-                              <button onClick={() => { setSelectedTx(tx); setModalType('reverse_manual'); }} className="text-amber-600 hover:text-amber-800 bg-amber-50 hover:bg-amber-100 p-1.5 rounded transition-colors" title="إلغاء/تصحيح الحركة">
-                                <Undo2 className="h-4 w-4" />
-                              </button>
-                            )}
-                            
-                            {/* إلغاء تحويل (التحويل العكسي المزدوج) */}
-                            {['transfer_in', 'transfer_out'].includes(tx.type) && tx.transferId && (
-                              <button onClick={() => { setSelectedTx(tx); setModalType('reverse_transfer'); }} className="text-orange-600 hover:text-orange-800 bg-orange-50 hover:bg-orange-100 p-1.5 rounded transition-colors" title="تحويل عكسي (إلغاء التحويل بالكامل)">
-                                <ArrowRightLeft className="h-4 w-4" />
-                              </button>
-                            )}
-                          </>
-                        )}
-                      </div>
+                  </tr>
+                ))}
+                {filteredTransactions.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="px-4 py-12 text-center text-muted-foreground">
+                      لا توجد حركات مطابقة في سجل الخزينة.
                     </td>
                   </tr>
-                );
-              })}
-              {filteredTransactions.length === 0 && !txLoading && (
-                <tr>
-                  <td colSpan={6} className="px-4 py-12 text-center text-muted-foreground">
-                    لا توجد حركات مطابقة للفلاتر المحددة.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
-      {/* ------------------------------------------------------------------- */}
-      {/* النوافذ المنبثقة (Modals) */}
-      {/* ------------------------------------------------------------------- */}
-      
-      {/* 1. نافذة الإيداع / السحب */}
-      {(modalType === 'deposit' || modalType === 'withdraw') && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+      {/* Manual Transaction Modal (In/Out) */}
+      {isManualModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="bg-card w-full max-w-md rounded-xl shadow-xl border border-border overflow-hidden">
-            <div className={`px-6 py-4 border-b border-border text-white ${modalType === 'deposit' ? 'bg-emerald-600' : 'bg-rose-600'}`}>
-              <h2 className="text-lg font-bold">{modalType === 'deposit' ? 'إيداع نقدي' : 'سحب نقدي'}</h2>
-            </div>
-            <form onSubmit={handleManualSubmit(onManualSubmit)} className="p-6 space-y-4">
-              <div className="space-y-2">
-                <label className="text-sm font-medium">المبلغ (ج.م) <span className="text-destructive">*</span></label>
-                <input type="number" step="0.01" {...registerManual("amount")} className="w-full px-3 py-2 bg-input border border-border rounded-md focus:ring-2 focus:ring-primary font-mono" placeholder="0.00" />
-                {manualErrors.amount && <p className="text-destructive text-xs">{manualErrors.amount.message}</p>}
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium">البيان / الوصف <span className="text-destructive">*</span></label>
-                <textarea {...registerManual("description")} className="w-full px-3 py-2 bg-input border border-border rounded-md focus:ring-2 focus:ring-primary" placeholder="اكتب سبب الحركة بوضوح..." rows={3} />
-                {manualErrors.description && <p className="text-destructive text-xs">{manualErrors.description.message}</p>}
-              </div>
-              <div className="flex gap-3 pt-4 border-t border-border mt-6">
-                <button type="button" onClick={closeModals} className="flex-1 bg-secondary text-secondary-foreground hover:bg-secondary/80 py-2 rounded-md font-medium">إلغاء</button>
-                <button type="submit" disabled={isSubmitting} className={`flex-1 text-white py-2 rounded-md font-medium flex justify-center items-center gap-2 ${modalType === 'deposit' ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-rose-600 hover:bg-rose-700'}`}>
-                  {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : null} تأكيد وحفظ
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* 2. نافذة التحويل لخزينة أخرى */}
-      {modalType === 'transfer' && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
-          <div className="bg-card w-full max-w-md rounded-xl shadow-xl border border-border overflow-hidden">
-            <div className="px-6 py-4 border-b border-border bg-blue-600 text-white">
-              <h2 className="text-lg font-bold">تحويل لخزينة أخرى</h2>
-            </div>
-            <form onSubmit={handleTransferSubmit(onTransferSubmit)} className="p-6 space-y-4">
-              <div className="space-y-2">
-                <label className="text-sm font-medium">إلى خزينة / حساب <span className="text-destructive">*</span></label>
-                <select {...registerTransfer("destinationId")} className="w-full px-3 py-2 bg-input border border-border rounded-md focus:ring-2 focus:ring-primary">
-                  <option value="">اختر الخزينة المستقبلة...</option>
-                  {cashboxes.filter(c => c.id !== id && c.isActive).map(c => (
-                    <option key={c.id} value={c.id}>{c.name}</option>
-                  ))}
-                </select>
-                {transferErrors.destinationId && <p className="text-destructive text-xs">{transferErrors.destinationId.message}</p>}
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium">مبلغ التحويل (ج.م) <span className="text-destructive">*</span></label>
-                <input type="number" step="0.01" {...registerTransfer("amount")} className="w-full px-3 py-2 bg-input border border-border rounded-md focus:ring-2 focus:ring-primary font-mono" placeholder="0.00" />
-                {transferErrors.amount && <p className="text-destructive text-xs">{transferErrors.amount.message}</p>}
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium">البيان (اختياري)</label>
-                <input type="text" {...registerTransfer("description")} className="w-full px-3 py-2 bg-input border border-border rounded-md focus:ring-2 focus:ring-primary" placeholder={`تحويل من ${cashbox.name}...`} />
-              </div>
-              <div className="flex gap-3 pt-4 border-t border-border mt-6">
-                <button type="button" onClick={closeModals} className="flex-1 bg-secondary text-secondary-foreground hover:bg-secondary/80 py-2 rounded-md font-medium">إلغاء</button>
-                <button type="submit" disabled={isSubmitting} className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-2 rounded-md font-medium flex justify-center items-center gap-2">
-                  {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : null} تنفيذ التحويل
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* 3. نافذة إلغاء حركة يدوية / أو تحويل عكسي */}
-      {(modalType === 'reverse_manual' || modalType === 'reverse_transfer') && selectedTx && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
-          <div className="bg-card w-full max-w-md rounded-xl shadow-xl border border-border overflow-hidden">
-            <div className={`px-6 py-4 border-b border-border text-white ${modalType === 'reverse_transfer' ? 'bg-orange-600' : 'bg-amber-600'}`}>
+            <div className={`flex items-center justify-between px-6 py-4 border-b border-border ${manualType === 'in' ? 'bg-emerald-50 text-emerald-900' : 'bg-rose-50 text-rose-900'}`}>
               <h2 className="text-lg font-bold flex items-center gap-2">
-                {modalType === 'reverse_transfer' ? <ArrowRightLeft className="h-5 w-5"/> : <Undo2 className="h-5 w-5"/>} 
-                {modalType === 'reverse_transfer' ? 'تحويل عكسي (إلغاء التحويل)' : 'إلغاء وتصحيح الحركة'}
+                {manualType === 'in' ? <><PlusCircle className="h-5 w-5" /> إيداع نقدي</> : <><MinusCircle className="h-5 w-5" /> سحب نقدي</>}
               </h2>
+              <button onClick={() => setIsManualModalOpen(false)} className="opacity-70 hover:opacity-100 transition-opacity p-1 text-xl leading-none">&times;</button>
             </div>
-            <form onSubmit={handleReverseSubmit(onReverseSubmit)} className="p-6 space-y-4">
-              <div className={`p-3 border rounded-md text-sm ${modalType === 'reverse_transfer' ? 'bg-orange-50 border-orange-200 text-orange-800' : 'bg-amber-50 border-amber-200 text-amber-800'}`}>
-                <p>
-                  {modalType === 'reverse_transfer' 
-                    ? `سيتم إنشاء تحويل عكسي لسحب المبلغ (${formatCurrency(selectedTx.amount)}) وإعادته، وسيتم إبطال التحويل الأصلي في الخزنتين لضمان سلامة الحسابات.` 
-                    : `لن يتم حذف الحركة. سيتم إنشاء حركة تصحيحية لضبط الرصيد، وتغيير حالة هذه الحركة إلى "ملغية".`}
-                </p>
+            
+            <div className="p-6">
+              <form id="manualForm" onSubmit={submitManualTransaction} className="space-y-4">
+                {actionError && (
+                  <div className="p-3 bg-destructive/10 border border-destructive/20 text-destructive rounded-md text-sm flex items-center gap-2">
+                    <AlertCircle className="h-4 w-4 shrink-0" />
+                    <p>{actionError}</p>
+                  </div>
+                )}
+                <div className="space-y-2">
+                  <label className="text-sm font-bold text-foreground">المبلغ ({cashbox?.currency}) <span className="text-destructive">*</span></label>
+                  <input 
+                    type="number" 
+                    step="0.01" 
+                    min="0.01" 
+                    required
+                    value={amount} 
+                    onChange={e => setAmount(e.target.value)} 
+                    className="w-full px-3 py-2 bg-input border border-border rounded-md focus:ring-2 focus:ring-primary font-bold text-lg" 
+                    placeholder="0.00" 
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-bold text-foreground">البيان / الوصف</label>
+                  <input 
+                    type="text" 
+                    value={description} 
+                    onChange={e => setDescription(e.target.value)} 
+                    className="w-full px-3 py-2 bg-input border border-border rounded-md focus:ring-2 focus:ring-primary text-sm" 
+                    placeholder="مثال: إيداع مبيعات اليوم / سداد مصروفات نثريات..." 
+                  />
+                </div>
+              </form>
+            </div>
+
+            <div className="px-6 py-4 border-t border-border bg-secondary/30 flex gap-3">
+              <button type="button" onClick={() => setIsManualModalOpen(false)} className="flex-1 bg-secondary text-secondary-foreground hover:bg-secondary/80 py-2 rounded-md font-medium">إلغاء</button>
+              <button 
+                form="manualForm" 
+                type="submit" 
+                disabled={isSubmitting || !amount} 
+                className={`flex-1 text-white py-2 rounded-md font-medium flex items-center justify-center gap-2 ${manualType === 'in' ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-rose-600 hover:bg-rose-700'} disabled:opacity-50`}
+              >
+                {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : 'تأكيد العملية'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Transfer Modal */}
+      {isTransferModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-card w-full max-w-md rounded-xl shadow-xl border border-border overflow-hidden">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-border bg-blue-50 text-blue-900">
+              <h2 className="text-lg font-bold flex items-center gap-2">
+                <ArrowLeftRight className="h-5 w-5" /> تحويل لخزينة أخرى
+              </h2>
+              <button onClick={() => setIsTransferModalOpen(false)} className="opacity-70 hover:opacity-100 transition-opacity p-1 text-xl leading-none">&times;</button>
+            </div>
+            
+            <div className="p-6">
+              <form id="transferForm" onSubmit={submitTransfer} className="space-y-4">
+                {actionError && (
+                  <div className="p-3 bg-destructive/10 border border-destructive/20 text-destructive rounded-md text-sm flex items-center gap-2">
+                    <AlertCircle className="h-4 w-4 shrink-0" />
+                    <p>{actionError}</p>
+                  </div>
+                )}
+                
+                <div className="space-y-2">
+                  <label className="text-sm font-bold text-foreground">تحويل إلى <span className="text-destructive">*</span></label>
+                  <select 
+                    required
+                    value={destCashboxId} 
+                    onChange={e => setDestCashboxId(e.target.value)} 
+                    className="w-full px-3 py-2 bg-input border border-border rounded-md focus:ring-2 focus:ring-primary text-sm font-medium"
+                  >
+                    <option value="">-- اختر الخزينة المستقبلة --</option>
+                    {cashboxes.filter(c => c.id !== id && c.isActive).map(c => (
+                      <option key={c.id} value={c.id}>{c.name} (الرصيد: {c.balance})</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-sm font-bold text-foreground">المبلغ ({cashbox?.currency}) <span className="text-destructive">*</span></label>
+                  <input 
+                    type="number" 
+                    step="0.01" 
+                    min="0.01" 
+                    required
+                    value={amount} 
+                    onChange={e => setAmount(e.target.value)} 
+                    className="w-full px-3 py-2 bg-input border border-border rounded-md focus:ring-2 focus:ring-primary font-bold text-lg" 
+                    placeholder="0.00" 
+                  />
+                  <p className="text-xs text-muted-foreground">أقصى مبلغ متاح للتحويل: {cashbox?.balance}</p>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-sm font-bold text-foreground">البيان / الوصف</label>
+                  <input 
+                    type="text" 
+                    value={description} 
+                    onChange={e => setDescription(e.target.value)} 
+                    className="w-full px-3 py-2 bg-input border border-border rounded-md focus:ring-2 focus:ring-primary text-sm" 
+                    placeholder="مثال: عهدة مؤقتة / تحويل أرباح..." 
+                  />
+                </div>
+              </form>
+            </div>
+
+            <div className="px-6 py-4 border-t border-border bg-secondary/30 flex gap-3">
+              <button type="button" onClick={() => setIsTransferModalOpen(false)} className="flex-1 bg-secondary text-secondary-foreground hover:bg-secondary/80 py-2 rounded-md font-medium">إلغاء</button>
+              <button 
+                form="transferForm" 
+                type="submit" 
+                disabled={isSubmitting || !amount || !destCashboxId} 
+                className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-2 rounded-md font-medium flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : 'تأكيد التحويل'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reverse Transaction Modal */}
+      {isReverseModalOpen && txToReverse && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-card w-full max-w-sm rounded-xl shadow-xl border border-border overflow-hidden">
+            <div className="p-6 text-center space-y-4">
+              <div className="w-16 h-16 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center mx-auto mb-4">
+                <RotateCcw className="h-8 w-8" />
               </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium">سبب الإلغاء <span className="text-destructive">*</span></label>
-                <textarea {...registerReverse("reason")} className="w-full px-3 py-2 bg-input border border-border rounded-md focus:ring-2 focus:ring-primary" placeholder="مثال: تم إدخال المبلغ بالخطأ..." rows={2} />
-                {reverseErrors.reason && <p className="text-destructive text-xs">{reverseErrors.reason.message}</p>}
+              <h2 className="text-xl font-bold text-foreground">تأكيد إلغاء الحركة</h2>
+              <div className="text-sm text-muted-foreground p-3 bg-secondary/50 rounded-lg text-right">
+                <p><strong>المبلغ:</strong> {txToReverse.amount}</p>
+                <p><strong>البيان:</strong> {txToReverse.description}</p>
               </div>
-              <div className="flex gap-3 pt-4 border-t border-border mt-6">
-                <button type="button" onClick={closeModals} className="flex-1 bg-secondary text-secondary-foreground hover:bg-secondary/80 py-2 rounded-md font-medium">تراجع</button>
-                <button type="submit" disabled={isSubmitting} className={`flex-1 text-white py-2 rounded-md font-medium flex justify-center items-center gap-2 ${modalType === 'reverse_transfer' ? 'bg-orange-600 hover:bg-orange-700' : 'bg-amber-600 hover:bg-amber-700'}`}>
-                  {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : null} تأكيد الإلغاء
+              <p className="text-xs text-rose-600 font-bold">
+                تنبيه: سيتم تسجيل حركة عكسية جديدة في السجل لتسوية الرصيد ولن يتم مسح الحركة القديمة للحفاظ على التسلسل المحاسبي.
+              </p>
+              
+              {actionError && (
+                <div className="p-3 bg-destructive/10 border border-destructive/20 text-destructive rounded-md text-xs font-semibold mt-4 text-right">
+                  {actionError}
+                </div>
+              )}
+              
+              <div className="flex gap-3 pt-4 mt-2">
+                <button type="button" onClick={() => setIsReverseModalOpen(false)} className="flex-1 bg-secondary text-secondary-foreground hover:bg-secondary/80 py-2 rounded-md font-medium">تراجع</button>
+                <button 
+                  type="button" 
+                  onClick={submitReverse} 
+                  disabled={isSubmitting} 
+                  className="flex-1 bg-rose-600 hover:bg-rose-700 text-white py-2 rounded-md font-medium flex items-center justify-center gap-2"
+                >
+                  {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : 'تأكيد الإلغاء'}
                 </button>
               </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* 4. نافذة تفاصيل الحركة (View Details) */}
-      {modalType === 'details' && selectedTx && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in">
-          <div className="bg-card w-full max-w-lg rounded-xl shadow-xl border border-border overflow-hidden">
-            <div className="px-6 py-4 border-b border-border bg-secondary/50 flex justify-between items-center">
-              <h2 className="text-lg font-bold flex items-center gap-2"><Info className="h-5 w-5 text-primary"/> تفاصيل الحركة</h2>
-              {selectedTx.status === 'active' ? (
-                <span className="bg-emerald-100 text-emerald-800 px-2 py-1 rounded text-xs font-bold">معتمدة</span>
-              ) : (
-                <span className="bg-destructive/10 text-destructive px-2 py-1 rounded text-xs font-bold">ملغية / معكوسة</span>
-              )}
-            </div>
-            <div className="p-6 space-y-4 text-sm">
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <p className="text-muted-foreground text-xs mb-1 flex items-center gap-1"><Calendar className="h-3 w-3"/> التاريخ والوقت</p>
-                  <p className="font-semibold" dir="ltr">{formatDate(selectedTx.createdAt)}</p>
-                </div>
-                <div>
-                  <p className="text-muted-foreground text-xs mb-1 flex items-center gap-1"><Hash className="h-3 w-3"/> نوع الحركة</p>
-                  <p className="font-semibold">{txTypeLabels[selectedTx.type]}</p>
-                </div>
-                <div>
-                  <p className="text-muted-foreground text-xs mb-1">المبلغ</p>
-                  <p className={`font-mono font-bold text-lg ${selectedTx.flow === 'in' ? 'text-emerald-600' : 'text-rose-600'}`} dir="ltr">
-                    {selectedTx.flow === 'in' ? '+' : '-'}{formatCurrency(selectedTx.amount)}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-muted-foreground text-xs mb-1">الرصيد بعد الحركة</p>
-                  <p className="font-mono font-bold text-lg text-foreground" dir="ltr">
-                    {formatCurrency(selectedTx.balanceAfter)}
-                  </p>
-                </div>
-              </div>
-              
-              <div className="border-t border-border pt-4">
-                <p className="text-muted-foreground text-xs mb-1">البيان / الوصف</p>
-                <p className="font-medium bg-secondary/30 p-2 rounded border border-border/50">{selectedTx.description}</p>
-              </div>
-
-              {selectedTx.counterpartCashboxName && (
-                <div className="border-t border-border pt-4">
-                  <p className="text-muted-foreground text-xs mb-1">الخزينة المقابلة (الطرف الآخر)</p>
-                  <p className="font-medium">{selectedTx.counterpartCashboxName}</p>
-                </div>
-              )}
-
-              <div className="border-t border-border pt-4 grid grid-cols-2 gap-4">
-                <div>
-                  <p className="text-muted-foreground text-xs mb-1 flex items-center gap-1"><User className="h-3 w-3"/> بواسطة المستخدم</p>
-                  <p className="font-semibold text-xs truncate" title={selectedTx.createdBy}>{selectedTx.createdBy}</p>
-                </div>
-                {selectedTx.transferId && (
-                  <div>
-                    <p className="text-muted-foreground text-xs mb-1 flex items-center gap-1"><Hash className="h-3 w-3"/> رقم التحويل المرجعي</p>
-                    <p className="font-mono text-xs">{selectedTx.transferId}</p>
-                  </div>
-                )}
-                {selectedTx.referenceType === 'correction' && selectedTx.referenceId && (
-                  <div className="col-span-2">
-                    <p className="text-muted-foreground text-xs mb-1 text-amber-600 font-semibold">تعكس الحركة رقم:</p>
-                    <p className="font-mono text-xs">{selectedTx.referenceId}</p>
-                  </div>
-                )}
-              </div>
-            </div>
-            <div className="px-6 py-4 border-t border-border bg-secondary/30 text-left">
-              <button onClick={closeModals} className="bg-secondary text-secondary-foreground hover:bg-secondary/80 px-6 py-2 rounded-md font-medium">إغلاق</button>
             </div>
           </div>
         </div>
       )}
-
     </div>
   );
 }
