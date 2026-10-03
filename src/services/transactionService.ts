@@ -2,26 +2,47 @@ import {
   doc, 
   collection, 
   runTransaction, 
-  getDocs, 
-  query, 
-  where, 
-  orderBy, 
-  Timestamp, 
-  Transaction as FirestoreTransaction 
+  Timestamp,
+  Transaction as FirestoreTransaction,
+  getDocs,
+  query,
+  where,
+  orderBy
 } from 'firebase/firestore';
 import { db } from '../config/firebase';
-import { Cashbox, CashboxTransaction, FinancialReferenceType, TransactionType } from '../types';
+import { 
+  Cashbox, 
+  CashboxTransaction, 
+  FinancialReferenceType, 
+  TransactionType 
+} from '../types';
 
 const CASHBOXES_COLLECTION = 'cashboxes';
 const TRANSACTIONS_COLLECTION = 'cashbox_transactions';
 
+// ==========================================
+// 1. Interfaces & Types
+// ==========================================
+
+export interface PreparedManualTransaction {
+  isIdempotent: boolean;
+  transactionRef: any;
+  transactionData?: Omit<CashboxTransaction, 'id'>;
+  cashboxRef: any;
+  cashboxUpdateData?: {
+    balance: number;
+    updatedAt: Date;
+  };
+}
+
 export interface ManualTransactionParams {
+  transactionId?: string;
   cashboxId: string;
   type: TransactionType;
   amount: number;
-  referenceType?: FinancialReferenceType;
-  referenceId?: string;
-  description?: string;
+  referenceType: FinancialReferenceType;
+  referenceId: string;
+  description: string;
   createdBy: string;
 }
 
@@ -29,421 +50,433 @@ export interface TransferOperationParams {
   sourceCashboxId: string;
   destCashboxId: string;
   amount: number;
-  transferId?: string; 
+  transferId?: string;
   description?: string;
   createdBy: string;
 }
 
-export interface PreparedManualTransaction {
-  isIdempotent: boolean;
-  transactionRef: any; 
-  transactionData?: Omit<CashboxTransaction, 'id'>;
-  cashboxRef: any; 
-  cashboxUpdateData?: { balance: number; updatedAt: Date };
-}
-
-const validateAmount = (val: number) => {
-  if (!Number.isFinite(val) || Number.isNaN(val) || val <= 0) {
-    throw new Error('قيمة المعاملة غير صالحة: يجب أن تكون رقماً أكبر من الصفر');
-  }
-};
-
 // ==========================================
-// 1. Transaction-Aware Internal Functions (Read / Prepare Phase)
+// 2. Core Internal Transaction Methods
 // ==========================================
 
 export const prepareManualTransactionInTransaction = async (
   transaction: FirestoreTransaction,
   params: ManualTransactionParams,
-  generatedId: string
+  transactionId: string
 ): Promise<PreparedManualTransaction> => {
-  if (!params.cashboxId) throw new Error("معرف الخزينة مفقود");
-  if (params.type !== 'in' && params.type !== 'out') throw new Error(`نوع العملية غير صالح: ${params.type}. يجب أن يكون 'in' أو 'out' فقط.`);
+  const txRef = doc(db, TRANSACTIONS_COLLECTION, transactionId);
+  const txSnap = await transaction.get(txRef);
   
-  validateAmount(params.amount);
+  if (txSnap.exists()) {
+    const data = txSnap.data() as CashboxTransaction;
+    const isMatch = 
+      data.cashboxId === params.cashboxId &&
+      data.type === params.type &&
+      data.amount === params.amount &&
+      data.referenceType === params.referenceType &&
+      data.referenceId === params.referenceId;
+      
+    if (!isMatch) {
+      throw new Error("معرّف الحركة مستخدم مسبقاً لعملية ببيانات مختلفة.");
+    }
+    return { isIdempotent: true, transactionRef: txRef, cashboxRef: null };
+  }
 
-  const transactionRef = doc(db, TRANSACTIONS_COLLECTION, generatedId);
   const cashboxRef = doc(db, CASHBOXES_COLLECTION, params.cashboxId);
-
-  // Sequential Reads (Read Phase)
-  const transactionSnap = await transaction.get(transactionRef);
   const cashboxSnap = await transaction.get(cashboxRef);
 
-  // Idempotency Protection
-  if (transactionSnap.exists()) {
-    const existingData = transactionSnap.data() as CashboxTransaction;
-    const refType = params.referenceType || 'manual';
-    const refId = params.referenceId || generatedId;
-
-    if (
-      existingData.cashboxId === params.cashboxId &&
-      existingData.type === params.type &&
-      existingData.amount === params.amount &&
-      existingData.referenceType === refType &&
-      existingData.referenceId === refId
-    ) {
-      return { isIdempotent: true, transactionRef, cashboxRef }; // Idempotent Success
-    } else {
-      throw new Error("معرف المعاملة مستخدم بالفعل لعملية مختلفة.");
-    }
-  }
-
   if (!cashboxSnap.exists()) {
-    throw new Error(`الخزينة المطلوبة غير موجودة (${params.cashboxId})`);
+    throw new Error("الخزينة غير موجودة.");
   }
 
-  const cashboxData = cashboxSnap.data() as Cashbox;
-  
-  if (cashboxData.isActive === false) {
-    throw new Error(`لا يمكن إجراء عمليات مالية على خزينة غير نشطة (${cashboxData.name})`);
+  const cashbox = cashboxSnap.data() as Cashbox;
+  if (!cashbox.isActive) {
+    throw new Error("الخزينة غير نشطة.");
   }
 
-  const currentBalance = Number.isFinite(cashboxData.balance) ? cashboxData.balance : 0;
+  if (params.amount <= 0 || isNaN(params.amount) || !isFinite(params.amount)) {
+    throw new Error("مبلغ الحركة غير صالح ويجب أن يكون أكبر من صفر.");
+  }
 
-  let newBalance = currentBalance;
-  if (params.type === 'in') {
-    newBalance += params.amount;
-  } else {
-    if (currentBalance < params.amount) {
-      throw new Error(`رصيد الخزينة غير كافٍ. المتاح: ${currentBalance}`);
+  let newBalance = cashbox.balance;
+  if (params.type === 'out') {
+    if (cashbox.balance < params.amount) {
+      throw new Error(`رصيد الخزينة (${cashbox.name}) لا يكفي لإتمام الحركة.`);
     }
     newBalance -= params.amount;
+  } else {
+    newBalance += params.amount;
   }
-  
+
   newBalance = Number(newBalance.toFixed(4));
-  const now = Timestamp.now();
-
-  const transactionData: Omit<CashboxTransaction, 'id'> = {
-    cashboxId: params.cashboxId,
-    type: params.type,
-    amount: params.amount,
-    balanceAfter: newBalance,
-    referenceType: params.referenceType || 'manual',
-    referenceId: params.referenceId || generatedId,
-    description: params.description || '',
-    createdBy: params.createdBy || 'system',
-    createdAt: now as unknown as Date,
-  };
-
-  const cashboxUpdateData = { balance: newBalance, updatedAt: now as unknown as Date };
+  const now = Timestamp.now().toDate();
 
   return {
     isIdempotent: false,
-    transactionRef,
-    transactionData,
+    transactionRef: txRef,
+    transactionData: {
+      cashboxId: params.cashboxId,
+      type: params.type,
+      amount: params.amount,
+      balanceAfter: newBalance,
+      referenceType: params.referenceType,
+      referenceId: params.referenceId,
+      description: params.description,
+      createdBy: params.createdBy,
+      createdAt: now
+    },
     cashboxRef,
-    cashboxUpdateData
+    cashboxUpdateData: {
+      balance: newBalance,
+      updatedAt: now
+    }
   };
 };
 
-// ==========================================
-// 2. Transaction-Aware Internal Functions (Write Phase)
-// ==========================================
-
 export const commitManualTransactionInTransaction = (
   transaction: FirestoreTransaction,
-  prepared: PreparedManualTransaction
+  preparedTx: PreparedManualTransaction
 ): void => {
-  if (prepared.isIdempotent) return;
+  if (preparedTx.isIdempotent) return;
   
-  if (prepared.transactionData && prepared.cashboxUpdateData) {
-    transaction.set(prepared.transactionRef, prepared.transactionData);
-    transaction.update(prepared.cashboxRef, prepared.cashboxUpdateData);
-  }
+  transaction.update(preparedTx.cashboxRef, preparedTx.cashboxUpdateData!);
+  transaction.set(preparedTx.transactionRef, preparedTx.transactionData!);
 };
-
-// ==========================================
-// 3. Transaction-Aware Combined Execution (Backward Compatibility)
-// ==========================================
 
 export const processManualTransactionInTransaction = async (
   transaction: FirestoreTransaction,
-  params: ManualTransactionParams,
-  generatedId: string
+  params: ManualTransactionParams
 ): Promise<void> => {
-  const prepared = await prepareManualTransactionInTransaction(transaction, params, generatedId);
-  commitManualTransactionInTransaction(transaction, prepared);
+  const txId = params.transactionId || `tx_${params.referenceType}_${params.referenceId}_${params.cashboxId}`;
+  const preparedTx = await prepareManualTransactionInTransaction(transaction, params, txId);
+  commitManualTransactionInTransaction(transaction, preparedTx);
 };
 
 export const processTransferInTransaction = async (
   transaction: FirestoreTransaction,
-  params: TransferOperationParams,
-  transferId: string
+  params: TransferOperationParams
 ): Promise<void> => {
-  if (!params.sourceCashboxId || !params.destCashboxId) throw new Error("معرف الخزينة المصدر أو المستقبل مفقود");
-  if (params.sourceCashboxId === params.destCashboxId) throw new Error("لا يمكن التحويل لنفس الخزينة");
-  
-  validateAmount(params.amount);
+  if (params.sourceCashboxId === params.destCashboxId) {
+    throw new Error("لا يمكن التحويل لنفس الخزينة.");
+  }
+  if (params.amount <= 0 || isNaN(params.amount) || !isFinite(params.amount)) {
+    throw new Error("مبلغ التحويل غير صالح ويجب أن يكون أكبر من صفر.");
+  }
 
-  const outRef = doc(db, TRANSACTIONS_COLLECTION, `${transferId}_out_${params.sourceCashboxId}`);
-  const inRef = doc(db, TRANSACTIONS_COLLECTION, `${transferId}_in_${params.destCashboxId}`);
-  const sourceCashboxRef = doc(db, CASHBOXES_COLLECTION, params.sourceCashboxId);
-  const destCashboxRef = doc(db, CASHBOXES_COLLECTION, params.destCashboxId);
+  const transferId = params.transferId || `trans_${params.sourceCashboxId}_${params.destCashboxId}_${params.amount}`;
+  const outId = `${transferId}_out_${params.sourceCashboxId}`;
+  const inId = `${transferId}_in_${params.destCashboxId}`;
 
-  // Sequential Reads
+  const outRef = doc(db, TRANSACTIONS_COLLECTION, outId);
+  const inRef = doc(db, TRANSACTIONS_COLLECTION, inId);
+
   const outSnap = await transaction.get(outRef);
   const inSnap = await transaction.get(inRef);
-  const sourceSnap = await transaction.get(sourceCashboxRef);
-  const destSnap = await transaction.get(destCashboxRef);
 
-  const outExists = outSnap.exists();
-  const inExists = inSnap.exists();
-
-  // Strict Idempotency
-  if (outExists && inExists) {
+  if (outSnap.exists() && inSnap.exists()) {
     const outData = outSnap.data() as CashboxTransaction;
     const inData = inSnap.data() as CashboxTransaction;
 
-    if (
-      outData.type === 'out' &&
+    const isMatch = 
       outData.cashboxId === params.sourceCashboxId &&
+      outData.type === 'out' &&
       outData.amount === params.amount &&
       outData.referenceType === 'transfer' &&
       outData.referenceId === transferId &&
       outData.counterpartCashboxId === params.destCashboxId &&
-      inData.type === 'in' &&
       inData.cashboxId === params.destCashboxId &&
+      inData.type === 'in' &&
       inData.amount === params.amount &&
       inData.referenceType === 'transfer' &&
       inData.referenceId === transferId &&
-      inData.counterpartCashboxId === params.sourceCashboxId
-    ) {
-      return; // Idempotent Success
-    } else {
-      throw new Error("معرف التحويل مستخدم بالفعل لعملية تحويل مختلفة.");
-    }
+      inData.counterpartCashboxId === params.sourceCashboxId;
+
+    if (isMatch) return; // Idempotent success
+    throw new Error("معرّف التحويل مستخدم مسبقاً لعملية ببيانات مختلفة.");
   }
-  
-  if (outExists !== inExists) {
-    throw new Error(`حالة تحويل مالي غير متسقة. يرجى مراجعة الدعم الفني.`);
+  if (outSnap.exists() || inSnap.exists()) {
+    throw new Error("حالة التحويل غير متسقة.");
   }
 
-  if (!sourceSnap.exists()) throw new Error('الخزينة المصدر غير موجودة');
-  if (!destSnap.exists()) throw new Error('الخزينة المستقبلة غير موجودة');
+  const sourceRef = doc(db, CASHBOXES_COLLECTION, params.sourceCashboxId);
+  const destRef = doc(db, CASHBOXES_COLLECTION, params.destCashboxId);
 
-  const sourceData = sourceSnap.data() as Cashbox;
-  const destData = destSnap.data() as Cashbox;
+  const sourceSnap = await transaction.get(sourceRef);
+  const destSnap = await transaction.get(destRef);
 
-  if (sourceData.isActive === false) throw new Error(`الخزينة المصدر (${sourceData.name}) غير نشطة.`);
-  if (destData.isActive === false) throw new Error(`الخزينة المستقبلة (${destData.name}) غير نشطة.`);
+  if (!sourceSnap.exists()) throw new Error("الخزينة المصدر غير موجودة.");
+  if (!destSnap.exists()) throw new Error("الخزينة المستقبلة غير موجودة.");
 
-  const sourceBalance = Number.isFinite(sourceData.balance) ? sourceData.balance : 0;
-  const destBalance = Number.isFinite(destData.balance) ? destData.balance : 0;
+  const sourceCashbox = sourceSnap.data() as Cashbox;
+  const destCashbox = destSnap.data() as Cashbox;
 
-  if (sourceBalance < params.amount) {
-    throw new Error(`رصيد الخزينة المصدر غير كافٍ للتحويل. المتاح: ${sourceBalance}`);
+  if (!sourceCashbox.isActive || !destCashbox.isActive) {
+    throw new Error("إحدى الخزائن المحددة غير نشطة.");
+  }
+  if (sourceCashbox.balance < params.amount) {
+    throw new Error("رصيد الخزينة المصدر لا يكفي لإتمام التحويل.");
   }
 
-  const newSourceBalance = Number((sourceBalance - params.amount).toFixed(4));
-  const newDestBalance = Number((destBalance + params.amount).toFixed(4));
-  const now = Timestamp.now();
+  const newSourceBalance = Number((sourceCashbox.balance - params.amount).toFixed(4));
+  const newDestBalance = Number((destCashbox.balance + params.amount).toFixed(4));
+  const now = Timestamp.now().toDate();
 
-  const outTransactionData: Omit<CashboxTransaction, 'id'> = {
+  const outData: Omit<CashboxTransaction, 'id'> = {
     cashboxId: params.sourceCashboxId,
     type: 'out',
     amount: params.amount,
     balanceAfter: newSourceBalance,
     referenceType: 'transfer',
     referenceId: transferId,
-    description: params.description || 'تحويل صادر',
-    createdBy: params.createdBy || 'system',
-    createdAt: now as unknown as Date,
     counterpartCashboxId: params.destCashboxId,
+    description: params.description || `تحويل إلى الخزينة`,
+    createdBy: params.createdBy,
+    createdAt: now
   };
 
-  const inTransactionData: Omit<CashboxTransaction, 'id'> = {
+  const inData: Omit<CashboxTransaction, 'id'> = {
     cashboxId: params.destCashboxId,
     type: 'in',
     amount: params.amount,
     balanceAfter: newDestBalance,
     referenceType: 'transfer',
     referenceId: transferId,
-    description: params.description || 'تحويل وارد',
-    createdBy: params.createdBy || 'system',
-    createdAt: now as unknown as Date,
     counterpartCashboxId: params.sourceCashboxId,
+    description: params.description || `تحويل من الخزينة`,
+    createdBy: params.createdBy,
+    createdAt: now
   };
 
-  // Write Phase
-  transaction.set(outRef, outTransactionData);
-  transaction.set(inRef, inTransactionData);
-  transaction.update(sourceCashboxRef, { balance: newSourceBalance, updatedAt: now as unknown as Date });
-  transaction.update(destCashboxRef, { balance: newDestBalance, updatedAt: now as unknown as Date });
+  transaction.update(sourceRef, { balance: newSourceBalance, updatedAt: now });
+  transaction.update(destRef, { balance: newDestBalance, updatedAt: now });
+  transaction.set(outRef, outData);
+  transaction.set(inRef, inData);
 };
 
 // ==========================================
-// 4. Public Wrappers
+// 3. Standalone Service Methods
 // ==========================================
 
 export const processManualTransaction = async (params: ManualTransactionParams): Promise<void> => {
-  const generatedId = params.referenceId 
-    ? `${params.referenceId}_${params.type}_${params.cashboxId}` 
-    : doc(collection(db, TRANSACTIONS_COLLECTION)).id;
-
   await runTransaction(db, async (transaction) => {
-    await processManualTransactionInTransaction(transaction, params, generatedId);
+    await processManualTransactionInTransaction(transaction, params);
   });
 };
 
 export const processTransfer = async (params: TransferOperationParams): Promise<void> => {
-  const transferId = params.transferId || doc(collection(db, TRANSACTIONS_COLLECTION)).id;
-
   await runTransaction(db, async (transaction) => {
-    await processTransferInTransaction(transaction, params, transferId);
-  });
-};
-
-// ==========================================
-// 5. Reversal Functions
-// ==========================================
-
-export const reverseTransaction = async (transactionId: string, createdBy: string): Promise<void> => {
-  if (transactionId.startsWith('rev_')) {
-    throw new Error("لا يمكن عكس معاملة تمثل عملية عكس.");
-  }
-
-  await runTransaction(db, async (transaction) => {
-    const txRef = doc(db, TRANSACTIONS_COLLECTION, transactionId);
-    const txSnap = await transaction.get(txRef);
-    
-    if (!txSnap.exists()) throw new Error("المعاملة الأصلية غير موجودة.");
-
-    const txData = txSnap.data() as CashboxTransaction;
-    
-    if (txData.referenceType === 'transfer') {
-      throw new Error("هذه الحركة جزء من تحويل مالي. يرجى استخدام وظيفة عكس التحويل المخصصة.");
-    }
-
-    const cashboxRef = doc(db, CASHBOXES_COLLECTION, txData.cashboxId);
-    const revTxId = `rev_${transactionId}`;
-    const revTxRef = doc(db, TRANSACTIONS_COLLECTION, revTxId);
-
-    // Sequential Reads
-    const cashboxSnap = await transaction.get(cashboxRef);
-    const revSnap = await transaction.get(revTxRef);
-
-    if (revSnap.exists()) throw new Error("تم عكس هذه المعاملة مسبقاً.");
-    if (!cashboxSnap.exists()) throw new Error("الخزينة المرتبطة بهذه المعاملة غير موجودة.");
-
-    const cashboxData = cashboxSnap.data() as Cashbox;
-    
-    if (cashboxData.isActive === false) throw new Error("لا يمكن إلغاء معاملة لخزينة غير نشطة.");
-
-    const currentBalance = cashboxData.balance;
-    const reverseType: TransactionType = txData.type === 'in' ? 'out' : 'in';
-
-    if (reverseType === 'out' && currentBalance < txData.amount) {
-      throw new Error("رصيد الخزينة غير كافٍ لإلغاء هذه المعاملة (استرداد المبلغ سيؤدي لرصيد سالب).");
-    }
-
-    const newBalance = reverseType === 'in' ? currentBalance + txData.amount : currentBalance - txData.amount;
-    const now = Timestamp.now();
-
-    const newTxData: Omit<CashboxTransaction, 'id'> = {
-        cashboxId: txData.cashboxId,
-        type: reverseType,
-        amount: txData.amount,
-        balanceAfter: Number(newBalance.toFixed(4)),
-        referenceType: txData.referenceType,
-        referenceId: `rev_${txData.referenceId}`,
-        description: `إلغاء معاملة: ${txData.description}`,
-        createdBy: createdBy,
-        createdAt: now as unknown as Date,
-    };
-
-    // Write Phase
-    transaction.set(revTxRef, newTxData);
-    transaction.update(cashboxRef, { balance: Number(newBalance.toFixed(4)), updatedAt: now as unknown as Date });
+    await processTransferInTransaction(transaction, params);
   });
 };
 
 export const reverseTransfer = async (
-  transferId: string,
-  sourceCashboxId: string,
-  destCashboxId: string,
+  transferId: string, 
+  sourceCashboxId: string, 
+  destCashboxId: string, 
   createdBy: string
 ): Promise<void> => {
   await runTransaction(db, async (transaction) => {
-    const outRef = doc(db, TRANSACTIONS_COLLECTION, `${transferId}_out_${sourceCashboxId}`);
-    const inRef = doc(db, TRANSACTIONS_COLLECTION, `${transferId}_in_${destCashboxId}`);
-    const sourceCashboxRef = doc(db, CASHBOXES_COLLECTION, sourceCashboxId);
-    const destCashboxRef = doc(db, CASHBOXES_COLLECTION, destCashboxId);
-    const revInForSourceRef = doc(db, TRANSACTIONS_COLLECTION, `rev_${transferId}_in_${sourceCashboxId}`);
-    const revOutForDestRef = doc(db, TRANSACTIONS_COLLECTION, `rev_${transferId}_out_${destCashboxId}`);
+    // 1. Query Original Transactions
+    const txQuery = query(
+      collection(db, TRANSACTIONS_COLLECTION),
+      where('referenceId', '==', transferId),
+      where('referenceType', '==', 'transfer')
+    );
+    const querySnapshot = await transaction.get(txQuery);
 
-    // Sequential Reads
-    const outSnap = await transaction.get(outRef);
-    const inSnap = await transaction.get(inRef);
-    const sourceSnap = await transaction.get(sourceCashboxRef);
-    const destSnap = await transaction.get(destCashboxRef);
-    const revInSnap = await transaction.get(revInForSourceRef);
-    const revOutSnap = await transaction.get(revOutForDestRef);
+    if (querySnapshot.empty) {
+      throw new Error("لم يتم العثور على حركات هذا التحويل.");
+    }
 
-    const revInExists = revInSnap.exists();
-    const revOutExists = revOutSnap.exists();
+    const expectedOutId = `${transferId}_out_${sourceCashboxId}`;
+    const expectedInId = `${transferId}_in_${destCashboxId}`;
 
-    if (revInExists && revOutExists) throw new Error("تم عكس هذا التحويل مسبقاً.");
-    if (revInExists !== revOutExists) throw new Error("حالة عكس التحويل غير متسقة.");
-    if (!outSnap.exists() || !inSnap.exists()) throw new Error("الحركات الأصلية للتحويل غير موجودة.");
+    let outTx: CashboxTransaction | null = null;
+    let inTx: CashboxTransaction | null = null;
 
-    const outData = outSnap.data() as CashboxTransaction;
-    const inData = inSnap.data() as CashboxTransaction;
+    querySnapshot.forEach((docSnap) => {
+      if (docSnap.id === expectedOutId) {
+        outTx = docSnap.data() as CashboxTransaction;
+      }
+      if (docSnap.id === expectedInId) {
+        inTx = docSnap.data() as CashboxTransaction;
+      }
+    });
 
-    if (outData.type !== 'out' || inData.type !== 'in') throw new Error("أنواع الحركات الأصلية للتحويل غير صحيحة.");
-    if (outData.referenceType !== 'transfer' || inData.referenceType !== 'transfer') throw new Error("نوع المرجع للحركات الأصلية ليس تحويلاً.");
-    if (outData.referenceId !== transferId || inData.referenceId !== transferId) throw new Error("معرف التحويل غير متطابق في الحركات الأصلية.");
-    if (outData.cashboxId !== sourceCashboxId || inData.cashboxId !== destCashboxId) throw new Error("الخزائن غير متطابقة في الحركات الأصلية.");
-    if (outData.amount !== inData.amount) throw new Error("مبلغ التحويل غير متطابق بين الحركتين الأصليتين.");
+    if (!outTx) {
+      throw new Error("لم يتم العثور على حركة التحويل الصادرة الأصلية.");
+    }
+    if (!inTx) {
+      throw new Error("لم يتم العثور على حركة التحويل الواردة الأصلية.");
+    }
 
-    const originalAmount = outData.amount;
+    if (outTx.type !== 'out' || inTx.type !== 'in') {
+      throw new Error("أنواع الحركات الأصلية غير متطابقة مع المتوقع.");
+    }
+    if (outTx.referenceId !== transferId || inTx.referenceId !== transferId) {
+      throw new Error("المرجع الخاص بالحركات لا يتطابق مع معرف التحويل المطلوب.");
+    }
+    if (outTx.referenceType !== 'transfer' || inTx.referenceType !== 'transfer') {
+      throw new Error("نوع المرجع للحركات الأصلية يجب أن يكون تحويل.");
+    }
+    if (outTx.cashboxId !== sourceCashboxId || inTx.cashboxId !== destCashboxId) {
+      throw new Error("الخزائن المحددة غير متطابقة مع التحويل الأصلي.");
+    }
+    if (outTx.amount !== inTx.amount) {
+      throw new Error("عدم تطابق في مبلغ التحويل بين الحركتين الأصليتين.");
+    }
 
-    if (!sourceSnap.exists() || !destSnap.exists()) throw new Error("إحدى الخزائن المرتبطة بهذا التحويل غير موجودة.");
+    const amount = outTx.amount;
 
-    const sourceData = sourceSnap.data() as Cashbox;
-    const destData = destSnap.data() as Cashbox;
+    // 2. Read Cashboxes
+    const sourceRef = doc(db, CASHBOXES_COLLECTION, sourceCashboxId);
+    const destRef = doc(db, CASHBOXES_COLLECTION, destCashboxId);
+    
+    const sourceSnap = await transaction.get(sourceRef);
+    const destSnap = await transaction.get(destRef);
 
-    if (sourceData.isActive === false || destData.isActive === false) throw new Error("لا يمكن عكس تحويل مرتبط بخزينة غير نشطة.");
-    if (destData.balance < originalAmount) throw new Error(`رصيد الخزينة المستقبلة (${destData.name}) غير كافٍ لاسترجاع مبلغ التحويل.`);
+    // 3. Read Reverse Documents
+    const revInId = `rev_${transferId}_in_${sourceCashboxId}`;
+    const revOutId = `rev_${transferId}_out_${destCashboxId}`;
 
-    const newSourceBalance = Number((sourceData.balance + originalAmount).toFixed(4));
-    const newDestBalance = Number((destData.balance - originalAmount).toFixed(4));
-    const now = Timestamp.now();
+    const revInRef = doc(db, TRANSACTIONS_COLLECTION, revInId);
+    const revOutRef = doc(db, TRANSACTIONS_COLLECTION, revOutId);
 
-    const reverseInForSourceData: Omit<CashboxTransaction, 'id'> = {
+    const revInSnap = await transaction.get(revInRef);
+    const revOutSnap = await transaction.get(revOutRef);
+
+    // 4. Validate all conditions
+    if (!sourceSnap.exists() || !destSnap.exists()) {
+      throw new Error("إحدى الخزائن المرتبطة بهذا التحويل غير موجودة.");
+    }
+
+    const sourceCashbox = sourceSnap.data() as Cashbox;
+    const destCashbox = destSnap.data() as Cashbox;
+
+    if (!sourceCashbox.isActive || !destCashbox.isActive) {
+      throw new Error("إحدى الخزائن المحددة غير نشطة.");
+    }
+
+    if (revInSnap.exists() && revOutSnap.exists()) {
+      throw new Error("تم عكس هذا التحويل مسبقاً.");
+    }
+    if (revInSnap.exists() || revOutSnap.exists()) {
+      throw new Error("حالة عكس التحويل غير متسقة.");
+    }
+
+    if (destCashbox.balance < amount) {
+      throw new Error("رصيد الخزينة المستقبلة لا يكفي لعكس التحويل (الرصيد سيصبح سالباً).");
+    }
+
+    // 5. Prepare Writes
+    const newSourceBalance = Number((sourceCashbox.balance + amount).toFixed(4));
+    const newDestBalance = Number((destCashbox.balance - amount).toFixed(4));
+    const now = Timestamp.now().toDate();
+
+    const revInData: Omit<CashboxTransaction, 'id'> = {
       cashboxId: sourceCashboxId,
-      type: 'in', 
-      amount: originalAmount,
+      type: 'in',
+      amount: amount,
       balanceAfter: newSourceBalance,
       referenceType: 'transfer',
       referenceId: `rev_${transferId}`,
-      description: `عكس تحويل صادر: ${outData.description || ''}`,
+      counterpartCashboxId: destCashboxId,
+      description: `عكس تحويل صادر (رقم: ${transferId})`,
       createdBy: createdBy,
-      createdAt: now as unknown as Date,
+      createdAt: now
     };
 
-    const reverseOutForDestData: Omit<CashboxTransaction, 'id'> = {
+    const revOutData: Omit<CashboxTransaction, 'id'> = {
       cashboxId: destCashboxId,
       type: 'out',
-      amount: originalAmount,
+      amount: amount,
       balanceAfter: newDestBalance,
       referenceType: 'transfer',
       referenceId: `rev_${transferId}`,
-      description: `عكس تحويل وارد: ${inData.description || ''}`,
+      counterpartCashboxId: sourceCashboxId,
+      description: `عكس تحويل وارد (رقم: ${transferId})`,
       createdBy: createdBy,
-      createdAt: now as unknown as Date,
+      createdAt: now
     };
 
-    // Write Phase
-    transaction.set(revInForSourceRef, reverseInForSourceData);
-    transaction.set(revOutForDestRef, reverseOutForDestData);
-    transaction.update(sourceCashboxRef, { balance: newSourceBalance, updatedAt: now as unknown as Date });
-    transaction.update(destCashboxRef, { balance: newDestBalance, updatedAt: now as unknown as Date });
+    // 6. Execute Writes
+    transaction.update(sourceRef, { balance: newSourceBalance, updatedAt: now });
+    transaction.update(destRef, { balance: newDestBalance, updatedAt: now });
+    transaction.set(revInRef, revInData);
+    transaction.set(revOutRef, revOutData);
   });
 };
 
-// ==========================================
-// 6. Read-Only Public Functions
-// ==========================================
+export const reverseTransaction = async (transactionId: string, createdBy: string): Promise<void> => {
+  await runTransaction(db, async (transaction) => {
+    if (transactionId.startsWith('rev_')) {
+      throw new Error("لا يمكن عكس معاملة تمثل عملية عكس.");
+    }
+
+    const txRef = doc(db, TRANSACTIONS_COLLECTION, transactionId);
+    const txSnap = await transaction.get(txRef);
+
+    if (!txSnap.exists()) {
+      throw new Error("المعاملة الأصلية غير موجودة.");
+    }
+
+    const txData = txSnap.data() as CashboxTransaction;
+
+    if (txData.referenceType === 'transfer') {
+      throw new Error("لا يمكن عكس حركة تحويل مباشرة. استخدم ميزة عكس التحويل.");
+    }
+
+    const revId = `rev_${transactionId}`;
+    const revRef = doc(db, TRANSACTIONS_COLLECTION, revId);
+    const revSnap = await transaction.get(revRef);
+
+    if (revSnap.exists()) {
+      return; // Idempotent success
+    }
+
+    const cashboxRef = doc(db, CASHBOXES_COLLECTION, txData.cashboxId);
+    const cashboxSnap = await transaction.get(cashboxRef);
+
+    if (!cashboxSnap.exists()) {
+      throw new Error("الخزينة المرتبطة بهذه المعاملة غير موجودة.");
+    }
+
+    const cashbox = cashboxSnap.data() as Cashbox;
+    if (!cashbox.isActive) {
+      throw new Error("الخزينة المرتبطة غير نشطة.");
+    }
+    
+    const reverseType = txData.type === 'in' ? 'out' : 'in';
+    let newBalance = cashbox.balance;
+
+    if (reverseType === 'out') {
+      if (cashbox.balance < txData.amount) {
+        throw new Error("الرصيد الحالي لا يكفي لعكس هذه المعاملة (الرصيد سيصبح سالباً).");
+      }
+      newBalance -= txData.amount;
+    } else {
+      newBalance += txData.amount;
+    }
+
+    newBalance = Number(newBalance.toFixed(4));
+    const now = Timestamp.now().toDate();
+
+    const revTx: Omit<CashboxTransaction, 'id'> = {
+      cashboxId: txData.cashboxId,
+      type: reverseType,
+      amount: txData.amount,
+      balanceAfter: newBalance,
+      referenceType: txData.referenceType,
+      referenceId: `rev_${txData.referenceId}`,
+      description: `عكس معاملة سابقة (رقم: ${transactionId})`,
+      createdBy: createdBy,
+      createdAt: now
+    };
+
+    transaction.update(cashboxRef, { balance: newBalance, updatedAt: now });
+    transaction.set(revRef, revTx);
+  });
+};
 
 export const getCashboxLedger = async (cashboxId: string): Promise<CashboxTransaction[]> => {
   const q = query(
@@ -453,12 +486,13 @@ export const getCashboxLedger = async (cashboxId: string): Promise<CashboxTransa
   );
   
   const snapshot = await getDocs(q);
+  
   return snapshot.docs.map(doc => {
     const data = doc.data();
     return {
-      id: doc.id,
       ...data,
-      createdAt: data.createdAt?.toDate() || new Date(),
+      id: doc.id,
+      createdAt: data.createdAt?.toDate() || new Date()
     } as CashboxTransaction;
   });
 };
