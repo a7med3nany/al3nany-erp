@@ -51,6 +51,14 @@ export interface SupplierTransactionParams {
   createdBy: string;
 }
 
+export interface PreparedSupplierTransaction {
+  isIdempotent: boolean;
+  transactionRef: any;
+  transactionData?: Omit<SupplierTransaction, 'id'>;
+  supplierRef: any;
+  supplierUpdateData?: { balance: number; updatedAt: Date };
+}
+
 // Validation Helper
 const validateAmount = (val: number) => {
   if (!Number.isFinite(val) || Number.isNaN(val) || val <= 0) {
@@ -59,27 +67,18 @@ const validateAmount = (val: number) => {
 };
 
 // ==========================================
-// 2. Transaction-Aware Internal Functions
+// 2. Transaction-Aware Internal Functions (Read / Prepare Phase)
 // ==========================================
 
 /**
- * دالة ذرية (Transaction-Aware) لمعالجة حركة مالية للمورد.
- * يجب استدعاؤها من داخل runTransaction في دوال المشتريات والسدادات.
- * 
- * ملاحظة هامة حول (Idempotency):
- * الـ `generatedTxId` يجب أن يكون ID ثابتاً (deterministic) مشتقاً من العملية الأصلية،
- * وليس ID عشوائياً جديداً في كل استدعاء/إعادة محاولة (retry).
- * أمثلة:
- * - Purchase Invoice → Supplier Transaction ID ثابت مرتبط بـ Purchase Invoice ID.
- * - Supplier Payment → Transaction ID ثابت مرتبط بعملية السداد.
- * - Purchase Return → Transaction ID ثابت مرتبط بالمرتجع.
- * الهدف أن إعادة إرسال نفس العملية بنفس المرجع لا تنشئ Supplier Transaction جديدة.
+ * دالة القراءة والتجهيز لمعالجة حركة مالية للمورد.
+ * تقوم بتنفيذ القراءات وحساب الأرصدة وإرجاع كائن جاهز لمرحلة الكتابة.
  */
-export const processSupplierTransactionInTransaction = async (
+export const prepareSupplierTransactionInTransaction = async (
   transaction: FirestoreTransaction,
   params: SupplierTransactionParams,
   generatedTxId: string
-): Promise<void> => {
+): Promise<PreparedSupplierTransaction> => {
   if (!params.supplierId) throw new Error("معرف المورد مفقود");
   if (params.type !== 'in' && params.type !== 'out') {
     throw new Error(`نوع العملية غير صالح: ${params.type}. يجب أن يكون 'in' أو 'out' فقط.`);
@@ -90,7 +89,7 @@ export const processSupplierTransactionInTransaction = async (
   const transactionRef = doc(db, SUPPLIER_TX_COLLECTION, generatedTxId);
   const supplierRef = doc(db, SUPPLIERS_COLLECTION, params.supplierId);
 
-  // قراءة متسلسلة داخل Transaction لضمان الأمان وتجنب مشاكل Promise.all في Firestore
+  // قراءة متسلسلة داخل Transaction لضمان الأمان
   const transactionSnap = await transaction.get(transactionRef);
   const supplierSnap = await transaction.get(supplierRef);
 
@@ -104,7 +103,7 @@ export const processSupplierTransactionInTransaction = async (
       existingData.referenceType === params.referenceType &&
       existingData.referenceId === params.referenceId
     ) {
-      return; // Idempotent Success
+      return { isIdempotent: true, transactionRef, supplierRef }; // Idempotent Success
     } else {
       throw new Error("معرف معاملة المورد مستخدم بالفعل لعملية مختلفة.");
     }
@@ -147,13 +146,56 @@ export const processSupplierTransactionInTransaction = async (
     createdAt: now as unknown as Date,
   };
 
-  transaction.set(transactionRef, transactionData);
-  transaction.update(supplierRef, { balance: newBalance, updatedAt: now as unknown as Date });
+  const supplierUpdateData = { balance: newBalance, updatedAt: now as unknown as Date };
+
+  return {
+    isIdempotent: false,
+    transactionRef,
+    transactionData,
+    supplierRef,
+    supplierUpdateData
+  };
 };
 
+// ==========================================
+// 3. Transaction-Aware Internal Functions (Write Phase)
+// ==========================================
+
+/**
+ * دالة الكتابة لمعالجة حركة مالية للمورد.
+ * مسؤولة عن عمليات transaction.set و transaction.update فقط.
+ */
+export const commitSupplierTransactionInTransaction = (
+  transaction: FirestoreTransaction,
+  prepared: PreparedSupplierTransaction
+): void => {
+  if (prepared.isIdempotent) return;
+  
+  if (prepared.transactionData && prepared.supplierUpdateData) {
+    transaction.set(prepared.transactionRef, prepared.transactionData);
+    transaction.update(prepared.supplierRef, prepared.supplierUpdateData);
+  }
+};
 
 // ==========================================
-// 3. Supplier CRUD Operations
+// 4. Transaction-Aware Combined Execution (Backward Compatibility)
+// ==========================================
+
+/**
+ * دالة توافقية تجمع بين مرحلتي القراءة والكتابة للحفاظ على عمل الأكواد السابقة.
+ * ملاحظة (Idempotency): الـ `generatedTxId` يجب أن يكون ID ثابتاً (deterministic)
+ */
+export const processSupplierTransactionInTransaction = async (
+  transaction: FirestoreTransaction,
+  params: SupplierTransactionParams,
+  generatedTxId: string
+): Promise<void> => {
+  const prepared = await prepareSupplierTransactionInTransaction(transaction, params, generatedTxId);
+  commitSupplierTransactionInTransaction(transaction, prepared);
+};
+
+// ==========================================
+// 5. Supplier CRUD Operations
 // ==========================================
 
 export const createSupplier = async (params: CreateSupplierParams): Promise<string> => {
@@ -223,9 +265,8 @@ export const getSuppliers = async (): Promise<Supplier[]> => {
   });
 };
 
-
 // ==========================================
-// 4. Supplier Ledger (Read-Only)
+// 6. Supplier Ledger (Read-Only)
 // ==========================================
 
 export const getSupplierLedger = async (supplierId: string): Promise<SupplierTransaction[]> => {
