@@ -44,9 +44,20 @@ export function App() {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       setUser(user);
       setAuthReady(true);
+    }, (error) => {
+      console.error("Auth state change error:", error);
+      setAuthReady(true); // ضمان فك التعليق حتى لو حدث خطأ
     });
 
-    return () => unsubscribe();
+    // Fallback لضمان عدم تعليق الشاشة لأكثر من ثانيتين إذا تأخر جلب حالة الauth
+    const timer = setTimeout(() => {
+      setAuthReady(true);
+    }, 2000);
+
+    return () => {
+      unsubscribe();
+      clearTimeout(timer);
+    };
   }, [setUser, setAuthReady]);
 
   if (!isAuthReady) {
@@ -89,4 +100,4 @@ export function App() {
   );
 }
 
-export default App;
+default App;
