@@ -1,8 +1,3 @@
- 1. **إزالة "any" وتصحيح نوع التاريخ**: تمت إزالة any من دالة formatDate واستبدالها بنوع آمن Date | string | undefined متوافق مع ما ترجعه خدمة purchaseService.ts (التي تحول Timestamp إلى Date عبر .toDate()).
- 2. **إصلاح بنية <td>**: تم إزالة خصائص الـ flex و mt-2 من عنصر <td> مباشرة، وتم تغليف المحتوى داخل <div> مخصص للترتيب لضمان توافق الجدول مع معايير HTML وتجنب تشوه العرض.
-إليك الكود الكامل النهائي للملف:
-**المسار:** src/pages/purchases/PurchasesList.tsx
-```tsx
 import React, { useEffect, useState, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
@@ -367,5 +362,3 @@ const PurchasesList: React.FC = () => {
 };
 
 export default PurchasesList;
-
-```
