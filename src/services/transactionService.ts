@@ -1,4 +1,14 @@
-import { doc, collection, runTransaction, getDocs, query, where, orderBy, Timestamp, Transaction as FirestoreTransaction } from 'firebase/firestore';
+import { 
+  doc, 
+  collection, 
+  runTransaction, 
+  getDocs, 
+  query, 
+  where, 
+  orderBy, 
+  Timestamp, 
+  Transaction as FirestoreTransaction 
+} from 'firebase/firestore';
 import { db } from '../config/firebase';
 import { Cashbox, CashboxTransaction, FinancialReferenceType, TransactionType } from '../types';
 
@@ -24,6 +34,14 @@ export interface TransferOperationParams {
   createdBy: string;
 }
 
+export interface PreparedManualTransaction {
+  isIdempotent: boolean;
+  transactionRef: any; 
+  transactionData?: Omit<CashboxTransaction, 'id'>;
+  cashboxRef: any; 
+  cashboxUpdateData?: { balance: number; updatedAt: Date };
+}
+
 const validateAmount = (val: number) => {
   if (!Number.isFinite(val) || Number.isNaN(val) || val <= 0) {
     throw new Error('قيمة المعاملة غير صالحة: يجب أن تكون رقماً أكبر من الصفر');
@@ -31,14 +49,14 @@ const validateAmount = (val: number) => {
 };
 
 // ==========================================
-// 1. Transaction-Aware Internal Functions
+// 1. Transaction-Aware Internal Functions (Read / Prepare Phase)
 // ==========================================
 
-export const processManualTransactionInTransaction = async (
+export const prepareManualTransactionInTransaction = async (
   transaction: FirestoreTransaction,
   params: ManualTransactionParams,
   generatedId: string
-): Promise<void> => {
+): Promise<PreparedManualTransaction> => {
   if (!params.cashboxId) throw new Error("معرف الخزينة مفقود");
   if (params.type !== 'in' && params.type !== 'out') throw new Error(`نوع العملية غير صالح: ${params.type}. يجب أن يكون 'in' أو 'out' فقط.`);
   
@@ -47,12 +65,11 @@ export const processManualTransactionInTransaction = async (
   const transactionRef = doc(db, TRANSACTIONS_COLLECTION, generatedId);
   const cashboxRef = doc(db, CASHBOXES_COLLECTION, params.cashboxId);
 
-  const [transactionSnap, cashboxSnap] = await Promise.all([
-    transaction.get(transactionRef),
-    transaction.get(cashboxRef)
-  ]);
+  // Sequential Reads (Read Phase)
+  const transactionSnap = await transaction.get(transactionRef);
+  const cashboxSnap = await transaction.get(cashboxRef);
 
-  // حماية Idempotency مع مطابقة البيانات
+  // Idempotency Protection
   if (transactionSnap.exists()) {
     const existingData = transactionSnap.data() as CashboxTransaction;
     const refType = params.referenceType || 'manual';
@@ -65,7 +82,7 @@ export const processManualTransactionInTransaction = async (
       existingData.referenceType === refType &&
       existingData.referenceId === refId
     ) {
-      return; // Idempotent Success
+      return { isIdempotent: true, transactionRef, cashboxRef }; // Idempotent Success
     } else {
       throw new Error("معرف المعاملة مستخدم بالفعل لعملية مختلفة.");
     }
@@ -108,8 +125,44 @@ export const processManualTransactionInTransaction = async (
     createdAt: now as unknown as Date,
   };
 
-  transaction.set(transactionRef, transactionData);
-  transaction.update(cashboxRef, { balance: newBalance, updatedAt: now as unknown as Date });
+  const cashboxUpdateData = { balance: newBalance, updatedAt: now as unknown as Date };
+
+  return {
+    isIdempotent: false,
+    transactionRef,
+    transactionData,
+    cashboxRef,
+    cashboxUpdateData
+  };
+};
+
+// ==========================================
+// 2. Transaction-Aware Internal Functions (Write Phase)
+// ==========================================
+
+export const commitManualTransactionInTransaction = (
+  transaction: FirestoreTransaction,
+  prepared: PreparedManualTransaction
+): void => {
+  if (prepared.isIdempotent) return;
+  
+  if (prepared.transactionData && prepared.cashboxUpdateData) {
+    transaction.set(prepared.transactionRef, prepared.transactionData);
+    transaction.update(prepared.cashboxRef, prepared.cashboxUpdateData);
+  }
+};
+
+// ==========================================
+// 3. Transaction-Aware Combined Execution (Backward Compatibility)
+// ==========================================
+
+export const processManualTransactionInTransaction = async (
+  transaction: FirestoreTransaction,
+  params: ManualTransactionParams,
+  generatedId: string
+): Promise<void> => {
+  const prepared = await prepareManualTransactionInTransaction(transaction, params, generatedId);
+  commitManualTransactionInTransaction(transaction, prepared);
 };
 
 export const processTransferInTransaction = async (
@@ -124,21 +177,19 @@ export const processTransferInTransaction = async (
 
   const outRef = doc(db, TRANSACTIONS_COLLECTION, `${transferId}_out_${params.sourceCashboxId}`);
   const inRef = doc(db, TRANSACTIONS_COLLECTION, `${transferId}_in_${params.destCashboxId}`);
-
   const sourceCashboxRef = doc(db, CASHBOXES_COLLECTION, params.sourceCashboxId);
   const destCashboxRef = doc(db, CASHBOXES_COLLECTION, params.destCashboxId);
 
-  const [outSnap, inSnap, sourceSnap, destSnap] = await Promise.all([
-    transaction.get(outRef),
-    transaction.get(inRef),
-    transaction.get(sourceCashboxRef),
-    transaction.get(destCashboxRef)
-  ]);
+  // Sequential Reads
+  const outSnap = await transaction.get(outRef);
+  const inSnap = await transaction.get(inRef);
+  const sourceSnap = await transaction.get(sourceCashboxRef);
+  const destSnap = await transaction.get(destCashboxRef);
 
   const outExists = outSnap.exists();
   const inExists = inSnap.exists();
 
-  // حماية Idempotency الصارمة مع مطابقة البيانات
+  // Strict Idempotency
   if (outExists && inExists) {
     const outData = outSnap.data() as CashboxTransaction;
     const inData = inSnap.data() as CashboxTransaction;
@@ -213,6 +264,7 @@ export const processTransferInTransaction = async (
     counterpartCashboxId: params.sourceCashboxId,
   };
 
+  // Write Phase
   transaction.set(outRef, outTransactionData);
   transaction.set(inRef, inTransactionData);
   transaction.update(sourceCashboxRef, { balance: newSourceBalance, updatedAt: now as unknown as Date });
@@ -220,7 +272,7 @@ export const processTransferInTransaction = async (
 };
 
 // ==========================================
-// 2. Public Wrappers
+// 4. Public Wrappers
 // ==========================================
 
 export const processManualTransaction = async (params: ManualTransactionParams): Promise<void> => {
@@ -242,7 +294,7 @@ export const processTransfer = async (params: TransferOperationParams): Promise<
 };
 
 // ==========================================
-// 3. Reversal Functions
+// 5. Reversal Functions
 // ==========================================
 
 export const reverseTransaction = async (transactionId: string, createdBy: string): Promise<void> => {
@@ -263,7 +315,14 @@ export const reverseTransaction = async (transactionId: string, createdBy: strin
     }
 
     const cashboxRef = doc(db, CASHBOXES_COLLECTION, txData.cashboxId);
+    const revTxId = `rev_${transactionId}`;
+    const revTxRef = doc(db, TRANSACTIONS_COLLECTION, revTxId);
+
+    // Sequential Reads
     const cashboxSnap = await transaction.get(cashboxRef);
+    const revSnap = await transaction.get(revTxRef);
+
+    if (revSnap.exists()) throw new Error("تم عكس هذه المعاملة مسبقاً.");
     if (!cashboxSnap.exists()) throw new Error("الخزينة المرتبطة بهذه المعاملة غير موجودة.");
 
     const cashboxData = cashboxSnap.data() as Cashbox;
@@ -280,12 +339,6 @@ export const reverseTransaction = async (transactionId: string, createdBy: strin
     const newBalance = reverseType === 'in' ? currentBalance + txData.amount : currentBalance - txData.amount;
     const now = Timestamp.now();
 
-    const revTxId = `rev_${transactionId}`;
-    const revTxRef = doc(db, TRANSACTIONS_COLLECTION, revTxId);
-    
-    const revSnap = await transaction.get(revTxRef);
-    if (revSnap.exists()) throw new Error("تم عكس هذه المعاملة مسبقاً.");
-
     const newTxData: Omit<CashboxTransaction, 'id'> = {
         cashboxId: txData.cashboxId,
         type: reverseType,
@@ -298,6 +351,7 @@ export const reverseTransaction = async (transactionId: string, createdBy: strin
         createdAt: now as unknown as Date,
     };
 
+    // Write Phase
     transaction.set(revTxRef, newTxData);
     transaction.update(cashboxRef, { balance: Number(newBalance.toFixed(4)), updatedAt: now as unknown as Date });
   });
@@ -310,90 +364,54 @@ export const reverseTransfer = async (
   createdBy: string
 ): Promise<void> => {
   await runTransaction(db, async (transaction) => {
-    // 1. بناء معرّفات المستندات الأصلية للتحويل
     const outRef = doc(db, TRANSACTIONS_COLLECTION, `${transferId}_out_${sourceCashboxId}`);
     const inRef = doc(db, TRANSACTIONS_COLLECTION, `${transferId}_in_${destCashboxId}`);
-    
     const sourceCashboxRef = doc(db, CASHBOXES_COLLECTION, sourceCashboxId);
     const destCashboxRef = doc(db, CASHBOXES_COLLECTION, destCashboxId);
-
-    // 2. بناء معرّفات مستندات العكس
     const revInForSourceRef = doc(db, TRANSACTIONS_COLLECTION, `rev_${transferId}_in_${sourceCashboxId}`);
     const revOutForDestRef = doc(db, TRANSACTIONS_COLLECTION, `rev_${transferId}_out_${destCashboxId}`);
 
-    // 3. قراءة جميع المستندات معاً قبل أي كتابة
-    const [outSnap, inSnap, sourceSnap, destSnap, revInSnap, revOutSnap] = await Promise.all([
-      transaction.get(outRef),
-      transaction.get(inRef),
-      transaction.get(sourceCashboxRef),
-      transaction.get(destCashboxRef),
-      transaction.get(revInForSourceRef),
-      transaction.get(revOutForDestRef)
-    ]);
+    // Sequential Reads
+    const outSnap = await transaction.get(outRef);
+    const inSnap = await transaction.get(inRef);
+    const sourceSnap = await transaction.get(sourceCashboxRef);
+    const destSnap = await transaction.get(destCashboxRef);
+    const revInSnap = await transaction.get(revInForSourceRef);
+    const revOutSnap = await transaction.get(revOutForDestRef);
 
-    // 4. التحقق من حالة العكس (منع العكس الجزئي والمزدوج)
     const revInExists = revInSnap.exists();
     const revOutExists = revOutSnap.exists();
 
-    if (revInExists && revOutExists) {
-      throw new Error("تم عكس هذا التحويل مسبقاً.");
-    }
-    if (revInExists !== revOutExists) {
-      throw new Error("حالة عكس التحويل غير متسقة.");
-    }
-
-    // 5. التحقق من وجود الحركات الأصلية
-    if (!outSnap.exists() || !inSnap.exists()) {
-      throw new Error("الحركات الأصلية للتحويل غير موجودة.");
-    }
+    if (revInExists && revOutExists) throw new Error("تم عكس هذا التحويل مسبقاً.");
+    if (revInExists !== revOutExists) throw new Error("حالة عكس التحويل غير متسقة.");
+    if (!outSnap.exists() || !inSnap.exists()) throw new Error("الحركات الأصلية للتحويل غير موجودة.");
 
     const outData = outSnap.data() as CashboxTransaction;
     const inData = inSnap.data() as CashboxTransaction;
 
-    // 6. التحقق من الخصائص الدقيقة للحركات الأصلية
-    if (outData.type !== 'out' || inData.type !== 'in') {
-      throw new Error("أنواع الحركات الأصلية للتحويل غير صحيحة.");
-    }
-    if (outData.referenceType !== 'transfer' || inData.referenceType !== 'transfer') {
-      throw new Error("نوع المرجع للحركات الأصلية ليس تحويلاً.");
-    }
-    if (outData.referenceId !== transferId || inData.referenceId !== transferId) {
-      throw new Error("معرف التحويل غير متطابق في الحركات الأصلية.");
-    }
-    if (outData.cashboxId !== sourceCashboxId || inData.cashboxId !== destCashboxId) {
-      throw new Error("الخزائن غير متطابقة في الحركات الأصلية.");
-    }
-    if (outData.amount !== inData.amount) {
-      throw new Error("مبلغ التحويل غير متطابق بين الحركتين الأصليتين.");
-    }
+    if (outData.type !== 'out' || inData.type !== 'in') throw new Error("أنواع الحركات الأصلية للتحويل غير صحيحة.");
+    if (outData.referenceType !== 'transfer' || inData.referenceType !== 'transfer') throw new Error("نوع المرجع للحركات الأصلية ليس تحويلاً.");
+    if (outData.referenceId !== transferId || inData.referenceId !== transferId) throw new Error("معرف التحويل غير متطابق في الحركات الأصلية.");
+    if (outData.cashboxId !== sourceCashboxId || inData.cashboxId !== destCashboxId) throw new Error("الخزائن غير متطابقة في الحركات الأصلية.");
+    if (outData.amount !== inData.amount) throw new Error("مبلغ التحويل غير متطابق بين الحركتين الأصليتين.");
 
     const originalAmount = outData.amount;
 
-    // 7. التحقق من الخزائن
-    if (!sourceSnap.exists() || !destSnap.exists()) {
-      throw new Error("إحدى الخزائن المرتبطة بهذا التحويل غير موجودة.");
-    }
+    if (!sourceSnap.exists() || !destSnap.exists()) throw new Error("إحدى الخزائن المرتبطة بهذا التحويل غير موجودة.");
 
     const sourceData = sourceSnap.data() as Cashbox;
     const destData = destSnap.data() as Cashbox;
 
-    if (sourceData.isActive === false || destData.isActive === false) {
-      throw new Error("لا يمكن عكس تحويل مرتبط بخزينة غير نشطة.");
-    }
+    if (sourceData.isActive === false || destData.isActive === false) throw new Error("لا يمكن عكس تحويل مرتبط بخزينة غير نشطة.");
+    if (destData.balance < originalAmount) throw new Error(`رصيد الخزينة المستقبلة (${destData.name}) غير كافٍ لاسترجاع مبلغ التحويل.`);
 
-    // 8. حماية الرصيد
-    if (destData.balance < originalAmount) {
-      throw new Error(`رصيد الخزينة المستقبلة (${destData.name}) غير كافٍ لاسترجاع مبلغ التحويل.`);
-    }
-
-    // 9. تجهيز البيانات والتحديثات
     const newSourceBalance = Number((sourceData.balance + originalAmount).toFixed(4));
     const newDestBalance = Number((destData.balance - originalAmount).toFixed(4));
     const now = Timestamp.now();
 
     const reverseInForSourceData: Omit<CashboxTransaction, 'id'> = {
       cashboxId: sourceCashboxId,
-      type: 'in', // إرجاع المبلغ للمصدر
+      type: 'in', 
       amount: originalAmount,
       balanceAfter: newSourceBalance,
       referenceType: 'transfer',
@@ -405,7 +423,7 @@ export const reverseTransfer = async (
 
     const reverseOutForDestData: Omit<CashboxTransaction, 'id'> = {
       cashboxId: destCashboxId,
-      type: 'out', // سحب المبلغ من المستقبل
+      type: 'out',
       amount: originalAmount,
       balanceAfter: newDestBalance,
       referenceType: 'transfer',
@@ -415,7 +433,7 @@ export const reverseTransfer = async (
       createdAt: now as unknown as Date,
     };
 
-    // 10. تنفيذ الكتابة الذرية
+    // Write Phase
     transaction.set(revInForSourceRef, reverseInForSourceData);
     transaction.set(revOutForDestRef, reverseOutForDestData);
     transaction.update(sourceCashboxRef, { balance: newSourceBalance, updatedAt: now as unknown as Date });
@@ -424,7 +442,7 @@ export const reverseTransfer = async (
 };
 
 // ==========================================
-// 4. Read-Only Public Functions
+// 6. Read-Only Public Functions
 // ==========================================
 
 export const getCashboxLedger = async (cashboxId: string): Promise<CashboxTransaction[]> => {
