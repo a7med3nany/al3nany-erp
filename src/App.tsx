@@ -46,10 +46,9 @@ export function App() {
       setAuthReady(true);
     }, (error) => {
       console.error("Auth state change error:", error);
-      setAuthReady(true); // ضمان فك التعليق حتى لو حدث خطأ
+      setAuthReady(true);
     });
 
-    // Fallback لضمان عدم تعليق الشاشة لأكثر من ثانيتين إذا تأخر جلب حالة الauth
     const timer = setTimeout(() => {
       setAuthReady(true);
     }, 2000);
@@ -100,4 +99,4 @@ export function App() {
   );
 }
 
-default App;
+export default App;
