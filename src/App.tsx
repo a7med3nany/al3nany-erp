@@ -49,13 +49,8 @@ export function App() {
       setAuthReady(true);
     });
 
-    const timer = setTimeout(() => {
-      setAuthReady(true);
-    }, 2000);
-
     return () => {
       unsubscribe();
-      clearTimeout(timer);
     };
   }, [setUser, setAuthReady]);
 
@@ -72,25 +67,28 @@ export function App() {
       <Routes>
         <Route path="/login" element={<Login />} />
         
-        <Route element={<ProtectedRoute><MainLayout /></ProtectedRoute>}>
-          <Route path="/" element={<Dashboard />} />
-          
-          {/* Master Data Routes */}
-          <Route path="/products" element={<Products />} />
-          <Route path="/categories" element={<Categories />} />
-          <Route path="/warehouses" element={<Warehouses />} />
-          <Route path="/warehouses/:id" element={<WarehouseDetails />} />
-          <Route path="/cashboxes" element={<Cashboxes />} />
-          <Route path="/cashboxes/:id" element={<CashboxDetails />} />
+        {/* Protected Routes Wrapper */}
+        <Route element={<ProtectedRoute />}>
+          <Route element={<MainLayout />}>
+            <Route path="/" element={<Dashboard />} />
+            
+            {/* Master Data Routes */}
+            <Route path="/products" element={<Products />} />
+            <Route path="/categories" element={<Categories />} />
+            <Route path="/warehouses" element={<Warehouses />} />
+            <Route path="/warehouses/:id" element={<WarehouseDetails />} />
+            <Route path="/cashboxes" element={<Cashboxes />} />
+            <Route path="/cashboxes/:id" element={<CashboxDetails />} />
 
-          {/* Phase 3: Suppliers & Purchases Routes */}
-          <Route path="/suppliers" element={<Suppliers />} />
-          <Route path="/suppliers/:id" element={<SupplierDetails />} />
-          
-          <Route path="/purchases" element={<PurchasesList />} />
-          <Route path="/purchases/new" element={<NewPurchaseInvoice />} />
-          <Route path="/purchases/return" element={<PurchaseReturn />} />
-          <Route path="/purchases/:id" element={<PurchaseDetails />} />
+            {/* Phase 3: Suppliers & Purchases Routes */}
+            <Route path="/suppliers" element={<Suppliers />} />
+            <Route path="/suppliers/:id" element={<SupplierDetails />} />
+            
+            <Route path="/purchases" element={<PurchasesList />} />
+            <Route path="/purchases/new" element={<NewPurchaseInvoice />} />
+            <Route path="/purchases/return" element={<PurchaseReturn />} />
+            <Route path="/purchases/:id" element={<PurchaseDetails />} />
+          </Route>
         </Route>
 
         <Route path="*" element={<Navigate to="/" replace />} />
