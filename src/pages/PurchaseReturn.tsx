@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo, Component, ErrorInfo, ReactNode } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
   ArrowRight, Search, Save, AlertCircle, 
@@ -10,54 +10,14 @@ import { useProductStore } from '../store/productStore';
 import { useCashboxStore } from '../store/cashboxStore';
 import { auth } from '../config/firebase';
 
-// Error Boundary للتسجيل الدقيق لرسالة الخطأ والـ Stack Trace
-class DiagnosticErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean; error: Error | null; errorInfo: ErrorInfo | null }> {
-  constructor(props: { children: ReactNode }) {
-    super(props);
-    this.state = { hasError: false, error: null, errorInfo: null };
-  }
-  static getDerivedStateFromError(error: Error) {
-    return { hasError: true, error };
-  }
-  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    this.setState({ errorInfo });
-    console.error("Diagnostic [PurchaseReturn Error]:", error, errorInfo);
-  }
-  render() {
-    if (this.state.hasError) {
-      return (
-        <div className="container mx-auto p-6 dir-rtl text-right" style={{ direction: 'rtl' }}>
-          <div className="bg-red-50 border border-red-200 p-6 rounded-2xl shadow-sm space-y-4">
-            <h1 className="text-xl font-bold text-red-800">تشخيص خطأ Runtime (PurchaseReturn)</h1>
-            <div className="bg-white p-4 rounded-xl border border-red-100">
-              <h3 className="font-bold text-red-600 mb-1">Message:</h3>
-              <p className="font-mono text-sm text-gray-800" style={{ direction: 'ltr', textAlign: 'left' }}>
-                {this.state.error?.message}
-              </p>
-            </div>
-            <div className="bg-white p-4 rounded-xl border border-red-100">
-              <h3 className="font-bold text-red-600 mb-1">Stack Trace:</h3>
-              <pre className="font-mono text-xs text-gray-700 overflow-auto max-h-96" style={{ direction: 'ltr', textAlign: 'left' }}>
-                {this.state.error?.stack}
-              </pre>
-            </div>
-          </div>
-        </div>
-      );
-    }
-    return this.props.children;
-  }
-}
-
-const PurchaseReturnContent: React.FC = () => {
+const PurchaseReturn: React.FC = () => {
   const navigate = useNavigate();
 
-  console.log("Diagnostic [PurchaseReturn]: Before Stores Destructuring");
+  // Stores
   const { purchaseInvoices, addPurchaseReturn, isLoading: isSaving, loadPurchaseInvoices } = usePurchaseStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
-  const { products, loadProducts } = useProductStore();
-  const { cashboxes, loadCashboxes } = useCashboxStore();
-  console.log("Diagnostic [PurchaseReturn]: After Stores Destructuring successfully");
+  const { products, fetchProducts } = useProductStore();
+  const { cashboxes, fetchCashboxes } = useCashboxStore();
 
   // Form State
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<string>('');
@@ -71,17 +31,13 @@ const PurchaseReturnContent: React.FC = () => {
   const [formError, setFormError] = useState('');
   const [isSuccess, setIsSuccess] = useState(false);
 
-  // Initial Data Load with Console Logging per Loader
+  // Initial Data Load
   useEffect(() => {
-    console.log("Diagnostic [PurchaseReturn]: About to call loadPurchaseInvoices");
     loadPurchaseInvoices();
-    console.log("Diagnostic [PurchaseReturn]: About to call loadSuppliers");
     loadSuppliers();
-    console.log("Diagnostic [PurchaseReturn]: About to call loadProducts");
-    loadProducts();
-    console.log("Diagnostic [PurchaseReturn]: About to call loadCashboxes");
-    loadCashboxes();
-  }, [loadPurchaseInvoices, loadSuppliers, loadProducts, loadCashboxes]);
+    fetchProducts();
+    fetchCashboxes();
+  }, [loadPurchaseInvoices, loadSuppliers, fetchProducts, fetchCashboxes]);
 
   // Derived Data
   const eligibleInvoices = useMemo(() => {
@@ -126,6 +82,7 @@ const PurchaseReturnContent: React.FC = () => {
     setCashboxId('');
     setFormError('');
     setInvoiceSearch('');
+    // توليد معرف جلسة فريد وثابت لضمان عدم تغير ID المرتجع عند إعادة المحاولة (Idempotency)
     setReturnSessionId(Date.now().toString(36)); 
   };
 
@@ -160,25 +117,50 @@ const PurchaseReturnContent: React.FC = () => {
 
   const validateForm = (): boolean => {
     setFormError('');
-    if (!selectedInvoice) return setFormError('يجب اختيار فاتورة المشتريات الأصلية.'), false;
+    
+    if (!selectedInvoice) {
+      return setFormError('يجب اختيار فاتورة المشتريات الأصلية.'), false;
+    }
+
     const hasItemsToReturn = Object.values(returnItems).some(qty => qty > 0);
-    if (!hasItemsToReturn) return setFormError('يجب تحديد كمية مرتجعة لصنف واحد على الأقل.'), false;
-    if (numRefundedAmount < 0) return setFormError('المبلغ المسترد لا يمكن أن يكون سالباً.'), false;
+    if (!hasItemsToReturn) {
+      return setFormError('يجب تحديد كمية مرتجعة لصنف واحد على الأقل.'), false;
+    }
+
+    if (numRefundedAmount < 0) {
+      return setFormError('المبلغ المسترد لا يمكن أن يكون سالباً.'), false;
+    }
+
     const TOLERANCE = 0.0001;
-    if (numRefundedAmount > totalReturnAmount + TOLERANCE) return setFormError('المبلغ المسترد نقدًا لا يمكن أن يتجاوز إجمالي قيمة المرتجع.'), false;
-    if (numRefundedAmount > 0 && !cashboxId) return setFormError('يجب تحديد الخزينة في حال وجود استرداد نقدي.'), false;
-    if (!auth.currentUser?.uid) return setFormError('يجب تسجيل الدخول لإتمام العملية.'), false;
+    if (numRefundedAmount > totalReturnAmount + TOLERANCE) {
+      return setFormError('المبلغ المسترد نقدًا لا يمكن أن يتجاوز إجمالي قيمة المرتجع.'), false;
+    }
+
+    if (numRefundedAmount > 0 && !cashboxId) {
+      return setFormError('يجب تحديد الخزينة في حال وجود استرداد نقدي.'), false;
+    }
+
+    if (!auth.currentUser?.uid) {
+      return setFormError('يجب تسجيل الدخول لإتمام العملية.'), false;
+    }
+
     return true;
   };
 
   const handleSubmit = async () => {
     if (!validateForm() || !selectedInvoice) return;
+
     try {
+      // بناء الـ ID باستخدام معرف الجلسة الثابت لضمان الـ Determinism
       const returnId = `ret_${selectedInvoice.id.slice(-6)}_${returnSessionId}`;
       const returnNumber = `PRET-${returnSessionId.toUpperCase()}`;
+
       const itemsToReturn = Object.entries(returnItems)
         .filter(([_, qty]) => qty > 0)
-        .map(([lineId, qty]) => ({ originalLineId: lineId, quantity: qty }));
+        .map(([lineId, qty]) => ({
+          originalLineId: lineId,
+          quantity: qty
+        }));
 
       await addPurchaseReturn({
         returnId,
@@ -191,7 +173,10 @@ const PurchaseReturnContent: React.FC = () => {
       });
 
       setIsSuccess(true);
-      setTimeout(() => { navigate('/purchases'); }, 2000);
+      setTimeout(() => {
+        navigate('/purchases');
+      }, 2000);
+
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'حدث خطأ أثناء حفظ المرتجع.');
     }
@@ -211,14 +196,15 @@ const PurchaseReturnContent: React.FC = () => {
     );
   }
 
-  console.log("Diagnostic [PurchaseReturn]: About to render final JSX");
-
   return (
     <div className="container mx-auto p-4 md:p-6 space-y-6 dir-rtl pb-24">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <button onClick={() => navigate(-1)} className="p-2 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">
+          <button 
+            onClick={() => navigate(-1)}
+            className="p-2 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+          >
             <ArrowRight className="w-5 h-5 text-gray-600" />
           </button>
           <div>
@@ -239,11 +225,16 @@ const PurchaseReturnContent: React.FC = () => {
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        
+        {/* Main Area: Invoice Selection & Items */}
         <div className="lg:col-span-2 space-y-6">
+          
+          {/* Section 1: Invoice Selection */}
           <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 space-y-4">
             <h2 className="text-lg font-semibold text-gray-800 flex items-center gap-2 border-b pb-3">
               <Receipt className="w-5 h-5 text-blue-600" /> اختيار الفاتورة الأصلية
             </h2>
+            
             <div className="relative">
               <Search className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5" />
               <input
@@ -253,11 +244,17 @@ const PurchaseReturnContent: React.FC = () => {
                 onChange={(e) => setInvoiceSearch(e.target.value)}
                 className="w-full pr-10 pl-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all"
               />
+              
+              {/* Dropdown Results */}
               {invoiceSearch && !selectedInvoice && (
                 <div className="absolute z-10 w-full mt-2 bg-white border border-gray-200 rounded-xl shadow-lg overflow-hidden max-h-60 overflow-y-auto">
                   {searchResults.length > 0 ? (
                     searchResults.map(inv => (
-                      <button key={inv.id} onClick={() => handleInvoiceSelect(inv.id)} className="w-full text-right px-4 py-3 hover:bg-blue-50 flex flex-col border-b border-gray-100 last:border-0">
+                      <button
+                        key={inv.id}
+                        onClick={() => handleInvoiceSelect(inv.id)}
+                        className="w-full text-right px-4 py-3 hover:bg-blue-50 flex flex-col border-b border-gray-100 last:border-0"
+                      >
                         <span className="font-semibold text-gray-800">فاتورة رقم: {inv.invoiceNumber}</span>
                         <span className="text-sm text-gray-500">المورد: {getSupplierName(inv.supplierId)}</span>
                       </button>
@@ -269,6 +266,7 @@ const PurchaseReturnContent: React.FC = () => {
               )}
             </div>
 
+            {/* Selected Invoice Details */}
             {selectedInvoice && (
               <div className="bg-blue-50/50 p-4 rounded-xl border border-blue-100 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
                 <div>
@@ -279,18 +277,23 @@ const PurchaseReturnContent: React.FC = () => {
                   <p className="text-sm text-gray-500 mb-1">المورد</p>
                   <p className="font-semibold text-gray-800">{getSupplierName(selectedInvoice.supplierId)}</p>
                 </div>
-                <button onClick={() => setSelectedInvoiceId('')} className="text-blue-600 hover:text-blue-800 text-sm font-medium underline">
+                <button 
+                  onClick={() => setSelectedInvoiceId('')}
+                  className="text-blue-600 hover:text-blue-800 text-sm font-medium underline"
+                >
                   تغيير الفاتورة
                 </button>
               </div>
             )}
           </div>
 
+          {/* Section 2: Items for Return */}
           {selectedInvoice && (
             <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 space-y-4">
               <h2 className="text-lg font-semibold text-gray-800 flex items-center gap-2 border-b pb-3">
                 <Box className="w-5 h-5 text-blue-600" /> الأصناف والكميات
               </h2>
+
               <div className="overflow-x-auto rounded-xl border border-gray-200">
                 <table className="w-full text-right text-sm">
                   <thead className="bg-gray-50 text-gray-600 border-b border-gray-200">
@@ -305,6 +308,7 @@ const PurchaseReturnContent: React.FC = () => {
                   </thead>
                   <tbody className="divide-y divide-gray-100">
                     {selectedInvoice.items.map((rawItem) => {
+                      // TypeScript-safe approach for returnedQuantity without altering the global type
                       const item = rawItem as typeof rawItem & { returnedQuantity?: number };
                       const previouslyReturned = item.returnedQuantity || 0;
                       const availableQty = item.quantity - previouslyReturned;
@@ -312,11 +316,21 @@ const PurchaseReturnContent: React.FC = () => {
 
                       return (
                         <tr key={item.lineId} className={`transition-colors ${availableQty === 0 ? 'bg-gray-50/50 opacity-60' : 'hover:bg-gray-50'}`}>
-                          <td className="px-4 py-3 font-medium text-gray-800">{getProductName(item.productId)}</td>
-                          <td className="px-4 py-3 text-center text-gray-600 font-medium">{item.quantity}</td>
-                          <td className="px-4 py-3 text-center text-orange-600 font-medium">{previouslyReturned}</td>
-                          <td className="px-4 py-3 text-center text-green-600 font-bold">{availableQty}</td>
-                          <td className="px-4 py-3 text-center text-gray-600 font-medium">{item.netUnitCost.toLocaleString()} ج.م</td>
+                          <td className="px-4 py-3 font-medium text-gray-800">
+                            {getProductName(item.productId)}
+                          </td>
+                          <td className="px-4 py-3 text-center text-gray-600 font-medium">
+                            {item.quantity}
+                          </td>
+                          <td className="px-4 py-3 text-center text-orange-600 font-medium">
+                            {previouslyReturned}
+                          </td>
+                          <td className="px-4 py-3 text-center text-green-600 font-bold">
+                            {availableQty}
+                          </td>
+                          <td className="px-4 py-3 text-center text-gray-600 font-medium">
+                            {item.netUnitCost.toLocaleString()} ج.م
+                          </td>
                           <td className="px-4 py-3 text-center bg-blue-50/30">
                             <input
                               type="number"
@@ -338,13 +352,17 @@ const PurchaseReturnContent: React.FC = () => {
               </div>
             </div>
           )}
+
         </div>
 
+        {/* Sidebar: Financials & Payment Settlement */}
         <div className="space-y-6">
+          
           <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 space-y-5">
             <h2 className="text-lg font-semibold text-gray-800 border-b pb-3 flex items-center gap-2">
               <CreditCard className="w-5 h-5 text-blue-600" /> التسوية المالية
             </h2>
+            
             {!selectedInvoice ? (
               <div className="text-center py-10 text-gray-400">
                 <Receipt className="w-12 h-12 mx-auto mb-2 opacity-50" />
@@ -352,10 +370,13 @@ const PurchaseReturnContent: React.FC = () => {
               </div>
             ) : (
               <div className="space-y-4">
+                
                 <div className="bg-gray-50 p-4 rounded-xl border border-gray-200 text-center">
                   <span className="text-sm text-gray-500 block mb-1">إجمالي قيمة المرتجع</span>
                   <span className="text-2xl font-black text-gray-900">{totalReturnAmount.toLocaleString()} ج.م</span>
+                  <p className="text-xs text-gray-400 mt-1">يتم التقييم باستخدام صافي التكلفة التاريخية</p>
                 </div>
+
                 <div className="space-y-2 pt-2 border-t border-gray-100">
                   <label className="text-sm font-medium text-gray-700">المبلغ المسترد نقدًا (إن وجد)</label>
                   <input
@@ -369,8 +390,9 @@ const PurchaseReturnContent: React.FC = () => {
                     placeholder="0"
                   />
                 </div>
+
                 {numRefundedAmount > 0 && (
-                  <div className="space-y-2">
+                  <div className="space-y-2 animate-in fade-in slide-in-from-top-2">
                     <label className="text-sm font-medium text-gray-700">إيداع في الخزينة <span className="text-red-500">*</span></label>
                     <select
                       value={cashboxId}
@@ -386,34 +408,49 @@ const PurchaseReturnContent: React.FC = () => {
                     </select>
                   </div>
                 )}
+
                 <div className="bg-orange-50 p-3 rounded-xl border border-orange-100 flex justify-between items-center mt-4">
                   <span className="text-sm font-medium text-orange-800">تخفيض مديونية المورد (رصيد دائن):</span>
-                  <span className="font-bold text-orange-700 text-lg">{supplierCreditAmount.toLocaleString()} ج.م</span>
+                  <span className="font-bold text-orange-700 text-lg">
+                    {supplierCreditAmount.toLocaleString()} ج.م
+                  </span>
                 </div>
+
               </div>
             )}
           </div>
+
         </div>
       </div>
 
-      <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 p-4 shadow-sm z-40">
+      {/* Floating Action Bar */}
+      <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 p-4 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)] z-40">
         <div className="container mx-auto flex justify-end gap-4 px-4 md:px-6">
-          <button onClick={() => navigate(-1)} disabled={isSaving} className="px-6 py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-medium transition-colors">
+          <button
+            onClick={() => navigate(-1)}
+            disabled={isSaving}
+            className="px-6 py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-medium transition-colors"
+          >
             إلغاء
           </button>
-          <button onClick={handleSubmit} disabled={isSaving || !selectedInvoice || Object.values(returnItems).every(qty => qty === 0)} className="px-8 py-2.5 bg-orange-600 hover:bg-orange-700 text-white rounded-xl font-medium transition-colors disabled:opacity-50 flex items-center gap-2 min-w-[200px] justify-center">
-            {isSaving ? <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <><RotateCcw className="w-5 h-5" /> تأكيد المرتجع</>}
+          <button
+            onClick={handleSubmit}
+            disabled={isSaving || !selectedInvoice || Object.values(returnItems).every(qty => qty === 0)}
+            className="px-8 py-2.5 bg-orange-600 hover:bg-orange-700 text-white rounded-xl font-medium transition-colors disabled:opacity-50 flex items-center gap-2 min-w-[200px] justify-center"
+          >
+            {isSaving ? (
+              <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+            ) : (
+              <>
+                <RotateCcw className="w-5 h-5" /> تأكيد المرتجع
+              </>
+            )}
           </button>
         </div>
       </div>
+
     </div>
   );
 };
-
-const PurchaseReturn: React.FC = () => (
-  <DiagnosticErrorBoundary>
-    <PurchaseReturnContent />
-  </DiagnosticErrorBoundary>
-);
 
 export default PurchaseReturn;
