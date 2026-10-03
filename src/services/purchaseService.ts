@@ -361,6 +361,40 @@ const validatePurchaseReturnInput = (
 };
 
 // ==========================================
+// Date Helper
+// ==========================================
+
+const toDateSafe = (value: unknown): Date => {
+  if (!value) return new Date();
+
+  if (value instanceof Timestamp) {
+    return value.toDate();
+  }
+
+  if (value instanceof Date) {
+    return value;
+  }
+
+  if (
+    typeof value === 'object' &&
+    value !== null &&
+    'toDate' in value &&
+    typeof (value as { toDate?: unknown }).toDate === 'function'
+  ) {
+    return (value as { toDate: () => Date }).toDate();
+  }
+
+  if (typeof value === 'string' || typeof value === 'number') {
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed;
+    }
+  }
+
+  return new Date();
+};
+
+// ==========================================
 // 3. Core Purchase Invoice Service (Atomic)
 // ==========================================
 
@@ -1646,12 +1680,8 @@ export const getPurchaseInvoices =
       return {
         id: doc.id,
         ...data,
-        createdAt:
-          data.createdAt?.toDate() ||
-          new Date(),
-        updatedAt:
-          data.updatedAt?.toDate() ||
-          new Date()
+        createdAt: toDateSafe(data.createdAt),
+        updatedAt: toDateSafe(data.updatedAt)
       } as PurchaseInvoice;
     });
   };
@@ -1678,12 +1708,8 @@ export const getPurchaseInvoiceById =
     return {
       id: snap.id,
       ...data,
-      createdAt:
-        data.createdAt?.toDate() ||
-        new Date(),
-      updatedAt:
-        data.updatedAt?.toDate() ||
-        new Date()
+      createdAt: toDateSafe(data.createdAt),
+      updatedAt: toDateSafe(data.updatedAt)
     } as PurchaseInvoice;
   };
 
@@ -1713,12 +1739,8 @@ export const getPurchaseReturns =
       return {
         id: doc.id,
         ...data,
-        createdAt:
-          data.createdAt?.toDate() ||
-          new Date(),
-        updatedAt:
-          data.updatedAt?.toDate() ||
-          new Date()
+        createdAt: toDateSafe(data.createdAt),
+        updatedAt: toDateSafe(data.updatedAt)
       } as PurchaseReturn;
     });
   };
@@ -1745,11 +1767,7 @@ export const getPurchaseReturnById =
     return {
       id: snap.id,
       ...data,
-      createdAt:
-        data.createdAt?.toDate() ||
-        new Date(),
-      updatedAt:
-        data.updatedAt?.toDate() ||
-        new Date()
+      createdAt: toDateSafe(data.createdAt),
+      updatedAt: toDateSafe(data.updatedAt)
     } as PurchaseReturn;
   };
