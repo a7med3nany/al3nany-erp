@@ -1,28 +1,41 @@
-import { collection, doc, runTransaction, getDocs, query, where, orderBy, Timestamp, Transaction } from 'firebase/firestore';
+import { 
+  doc, 
+  collection, 
+  runTransaction, 
+  Timestamp, 
+  Transaction as FirestoreTransaction,
+  query,
+  where,
+  getDocs,
+  orderBy
+} from 'firebase/firestore';
 import { db } from '../config/firebase';
-import { InventoryItem, InventoryMovement, InventoryReferenceType, InventoryMovementType } from '../types';
+import { 
+  InventoryItem, 
+  InventoryMovement, 
+  InventoryMovementType, 
+  InventoryReferenceType 
+} from '../types';
 
-const INVENTORY_ITEMS_COLLECTION = 'inventory_items';
-const INVENTORY_MOVEMENTS_COLLECTION = 'inventory_movements';
+const INVENTORY_COLLECTION = 'inventory_items';
+const MOVEMENTS_COLLECTION = 'inventory_movements';
 
-// توسيع محلي لدعم الحقل الاختياري
-interface InventoryMovementWithLine extends Omit<InventoryMovement, 'id'> {
-  sourceLineId?: string;
-}
+// ==========================================
+// 1. Backward Compatibility Interfaces (Old API)
+// ==========================================
 
 export interface StockItemInput {
   productId: string;
   quantity: number;
-  unitCost: number; // تكلفة الشراء أو التكلفة التاريخية
-  lineId?: string;  // معرف فريد للسطر داخل المستند لضمان Idempotency دقيقة
+  unitCost?: number;
+  sourceLineId?: string;
 }
 
 export interface StockOperationParams {
   warehouseId: string;
-  referenceType: InventoryReferenceType;
-  referenceId: string; 
-  type: InventoryMovementType;
   items: StockItemInput[];
+  referenceType: InventoryReferenceType;
+  referenceId: string;
   description?: string;
   createdBy: string;
 }
@@ -30,462 +43,632 @@ export interface StockOperationParams {
 export interface TransferItemInput {
   productId: string;
   quantity: number;
-  lineId?: string;
+  sourceLineId?: string;
 }
 
 export interface TransferOperationParams {
   sourceWarehouseId: string;
   destWarehouseId: string;
-  transferId: string;
   items: TransferItemInput[];
+  transferId?: string;
   description?: string;
   createdBy: string;
 }
 
-// دالة مساعدة للتحقق من سلامة الأرقام المالية والكميات
-const validateNumber = (val: number, fieldName: string, allowZero = false) => {
-  if (!Number.isFinite(val) || Number.isNaN(val)) {
-    throw new Error(`قيمة غير صالحة لـ ${fieldName}: يجب أن تكون رقماً معرفاً (Finite)`);
+// ==========================================
+// 2. New Atomic Single-Item Interfaces
+// ==========================================
+
+export interface ProcessStockInParams {
+  productId: string;
+  warehouseId: string;
+  quantity: number;
+  unitCost: number;
+  referenceType: InventoryReferenceType;
+  referenceId: string;
+  sourceLineId?: string;
+  description?: string;
+  createdBy: string;
+}
+
+export interface ProcessStockOutParams {
+  productId: string;
+  warehouseId: string;
+  quantity: number;
+  referenceType: InventoryReferenceType;
+  referenceId: string;
+  sourceLineId?: string;
+  description?: string;
+  createdBy: string;
+}
+
+export interface ProcessWarehouseTransferParams {
+  productId: string;
+  sourceWarehouseId: string;
+  destWarehouseId: string;
+  quantity: number;
+  transferId: string;
+  sourceLineId?: string;
+  description?: string;
+  createdBy: string;
+}
+
+export interface PreparedStockIn {
+  isIdempotent: boolean;
+  movementRef: any;
+  movementData?: Omit<InventoryMovement, 'id'>;
+  itemRef: any;
+  itemData?: Omit<InventoryItem, 'id'> | Partial<InventoryItem>;
+  isNewItem?: boolean;
+}
+
+export interface PreparedStockOut {
+  isIdempotent: boolean;
+  movementRef: any;
+  movementData?: Omit<InventoryMovement, 'id'>;
+  itemRef: any;
+  itemUpdateData?: Partial<InventoryItem>;
+}
+
+export interface PreparedWarehouseTransfer {
+  isIdempotent: boolean;
+  outMovementRef: any;
+  outMovementData?: Omit<InventoryMovement, 'id'>;
+  inMovementRef: any;
+  inMovementData?: Omit<InventoryMovement, 'id'>;
+  sourceItemRef: any;
+  sourceItemUpdateData?: Partial<InventoryItem>;
+  destItemRef: any;
+  destItemData?: Omit<InventoryItem, 'id'> | Partial<InventoryItem>;
+  isNewDestItem?: boolean;
+}
+
+// ==========================================
+// 3. Validation Helpers
+// ==========================================
+
+const validateQuantity = (qty: number) => {
+  if (!Number.isFinite(qty) || Number.isNaN(qty) || qty <= 0) {
+    throw new Error('الكمية يجب أن تكون رقماً صحيحاً وموجباً.');
   }
-  if (allowZero ? val < 0 : val <= 0) {
-    throw new Error(`قيمة غير صالحة لـ ${fieldName}: يجب أن تكون أكبر من الصفر`);
-  }
+};
+
+const generateMovementId = (refType: string, refId: string, type: string, lineId?: string) => {
+  return `mov_${refType}_${refId}_${lineId || 'main'}_${type}`;
 };
 
 // ==========================================
-// 1. Transaction-Aware Internal Functions
+// 4. Stock In (Read/Prepare Phase)
 // ==========================================
 
-export const processStockInInTransaction = async (transaction: Transaction, params: StockOperationParams): Promise<void> => {
-  if (!params.items || params.items.length === 0) throw new Error('لا توجد أصناف لتسجيلها');
+export const prepareStockInInTransaction = async (
+  transaction: FirestoreTransaction,
+  params: ProcessStockInParams
+): Promise<PreparedStockIn> => {
+  if (!params.productId || !params.warehouseId) throw new Error("معرف المنتج والمخزن مطلوبان.");
+  validateQuantity(params.quantity);
+  if (params.unitCost < 0) throw new Error("التكلفة لا يمكن أن تكون سالبة.");
 
-  for (const item of params.items) {
-    validateNumber(item.quantity, 'الكمية');
-    validateNumber(item.unitCost, 'تكلفة الوحدة', true);
-  }
-
-  const now = Timestamp.now();
-  const uniqueProductIds = Array.from(new Set(params.items.map(i => i.productId)));
-
-  // --- مرحلة 1: القراءات (Reads) ---
-  const movementSnaps = new Map<string, any>();
-  for (let i = 0; i < params.items.length; i++) {
-    const lineIdentifier = params.items[i].lineId || `idx_${i}`;
-    const movementId = `${params.referenceId}_${lineIdentifier}_in`;
-    movementSnaps.set(lineIdentifier, await transaction.get(doc(db, INVENTORY_MOVEMENTS_COLLECTION, movementId)));
-  }
-
-  const itemSnaps = new Map<string, any>();
-  for (const productId of uniqueProductIds) {
-    const inventoryItemId = `${params.warehouseId}_${productId}`;
-    itemSnaps.set(productId, await transaction.get(doc(db, INVENTORY_ITEMS_COLLECTION, inventoryItemId)));
-  }
-
-  // --- مرحلة 2: الحسابات التراكمية في الذاكرة (In-Memory Running State) ---
-  const runningState = new Map<string, { qty: number; wac: number }>();
-  for (const productId of uniqueProductIds) {
-    const snap = itemSnaps.get(productId);
-    if (snap && snap.exists()) {
-      const data = snap.data() as InventoryItem;
-      runningState.set(productId, {
-        qty: Number.isFinite(data.quantity) ? data.quantity : 0,
-        wac: Number.isFinite(data.wac) ? data.wac : 0,
-      });
-    } else {
-      runningState.set(productId, { qty: 0, wac: 0 });
-    }
-  }
-
-  const movementsToWrite: Array<{ ref: any; data: InventoryMovementWithLine }> = [];
-  const itemsToWrite = new Map<string, { ref: any; data: InventoryItem }>();
-
-  for (let i = 0; i < params.items.length; i++) {
-    const item = params.items[i];
-    const lineIdentifier = item.lineId || `idx_${i}`;
-    
-    if (movementSnaps.get(lineIdentifier)?.exists()) continue; // تخطي السطر لو نُفذ مسبقاً (Idempotency)
-
-    const currentState = runningState.get(item.productId)!;
-    const newQty = currentState.qty + item.quantity;
-    let newWac = 0;
-
-    const totalOldValue = currentState.qty * currentState.wac;
-    const totalNewValue = item.quantity * item.unitCost;
-    
-    if (newQty > 0) {
-      newWac = (totalOldValue + totalNewValue) / newQty;
-    }
-    
-    if (!Number.isFinite(newWac) || newWac < 0) {
-      throw new Error(`خلل محاسبي: نتج متوسط تكلفة غير صالح للصنف ${item.productId}`);
-    }
-    newWac = Number(newWac.toFixed(4));
-
-    // تحديث الحالة التراكمية في الذاكرة للسطر القادم
-    runningState.set(item.productId, { qty: newQty, wac: newWac });
-
-    const movementId = `${params.referenceId}_${lineIdentifier}_in`;
-    movementsToWrite.push({
-      ref: doc(db, INVENTORY_MOVEMENTS_COLLECTION, movementId),
-      data: {
-        productId: item.productId,
-        warehouseId: params.warehouseId,
-        type: params.type,
-        flow: 'in',
-        quantityIn: item.quantity,
-        quantityOut: 0,
-        balanceAfter: newQty,
-        unitCost: item.unitCost,
-        averageCostAfter: newWac,
-        referenceType: params.referenceType,
-        referenceId: params.referenceId,
-        sourceLineId: lineIdentifier,
-        description: params.description || '',
-        createdBy: params.createdBy,
-        createdAt: now as unknown as Date,
-        updatedAt: now as unknown as Date,
-      }
-    });
-
-    const inventoryItemId = `${params.warehouseId}_${item.productId}`;
-    itemsToWrite.set(item.productId, {
-      ref: doc(db, INVENTORY_ITEMS_COLLECTION, inventoryItemId),
-      data: {
-        id: inventoryItemId,
-        productId: item.productId,
-        warehouseId: params.warehouseId,
-        quantity: newQty,
-        wac: newWac,
-        inventoryValue: Number((newQty * newWac).toFixed(4)),
-        lastUpdatedAt: now as unknown as Date,
-      }
-    });
-  }
-
-  // --- مرحلة 3: الكتابات النهائية (Writes) ---
-  for (const mov of movementsToWrite) {
-    transaction.set(mov.ref, mov.data);
-  }
-  itemsToWrite.forEach((itemOps) => {
-    transaction.set(itemOps.ref, itemOps.data, { merge: true });
-  });
-};
-
-
-export const processStockOutInTransaction = async (transaction: Transaction, params: StockOperationParams): Promise<void> => {
-  if (!params.items || params.items.length === 0) throw new Error('لا توجد أصناف لتسجيلها');
-
-  for (const item of params.items) {
-    validateNumber(item.quantity, 'الكمية');
-    if (params.type === 'purchase_return') {
-      validateNumber(item.unitCost, 'تكلفة الوحدة التاريخية للمرتجع', true);
-    }
-  }
-
-  const now = Timestamp.now();
-  const uniqueProductIds = Array.from(new Set(params.items.map(i => i.productId)));
-
-  // --- مرحلة 1: القراءات (Reads) ---
-  const movementSnaps = new Map<string, any>();
-  for (let i = 0; i < params.items.length; i++) {
-    const lineIdentifier = params.items[i].lineId || `idx_${i}`;
-    const movementId = `${params.referenceId}_${lineIdentifier}_out`;
-    movementSnaps.set(lineIdentifier, await transaction.get(doc(db, INVENTORY_MOVEMENTS_COLLECTION, movementId)));
-  }
-
-  const itemSnaps = new Map<string, any>();
-  for (const productId of uniqueProductIds) {
-    const inventoryItemId = `${params.warehouseId}_${productId}`;
-    itemSnaps.set(productId, await transaction.get(doc(db, INVENTORY_ITEMS_COLLECTION, inventoryItemId)));
-  }
-
-  // --- مرحلة 2: الحسابات التراكمية (In-Memory Running State) ---
-  const runningState = new Map<string, { qty: number; wac: number }>();
-  for (const productId of uniqueProductIds) {
-    const snap = itemSnaps.get(productId);
-    if (!snap || !snap.exists()) {
-      throw new Error(`الصنف غير موجود بالمخزن ولا يمكن سحبه (${productId})`);
-    }
-    const data = snap.data() as InventoryItem;
-    runningState.set(productId, {
-      qty: Number.isFinite(data.quantity) ? data.quantity : 0,
-      wac: Number.isFinite(data.wac) ? data.wac : 0,
-    });
-  }
-
-  const movementsToWrite: Array<{ ref: any; data: InventoryMovementWithLine }> = [];
-  const itemsToWrite = new Map<string, { ref: any; data: Partial<InventoryItem> }>();
-
-  for (let i = 0; i < params.items.length; i++) {
-    const item = params.items[i];
-    const lineIdentifier = item.lineId || `idx_${i}`;
-    
-    if (movementSnaps.get(lineIdentifier)?.exists()) continue;
-
-    const currentState = runningState.get(item.productId)!;
-
-    // منع الرصيد السالب التراكمي
-    if (currentState.qty < item.quantity) {
-      throw new Error(`رصيد الصنف غير كافٍ. المتاح: ${currentState.qty}, المطلوب للسطر: ${item.quantity} (${item.productId})`);
-    }
-
-    const newQty = currentState.qty - item.quantity;
-    let newWac = currentState.wac;
-    let movementHistoricalCost = currentState.wac;
-
-    if (params.type === 'purchase_return') {
-      movementHistoricalCost = item.unitCost;
-      if (newQty === 0) {
-        newWac = 0;
-      } else {
-        const totalOldValue = currentState.qty * currentState.wac;
-        const returnedValue = item.quantity * movementHistoricalCost;
-        newWac = (totalOldValue - returnedValue) / newQty;
-
-        if (!Number.isFinite(newWac) || newWac < 0) {
-          throw new Error('خلل محاسبي: نتج متوسط تكلفة سالب. راجع تكلفة المرتجع التاريخية.');
-        }
-      }
-    } else {
-      newWac = currentState.wac;
-    }
-
-    newWac = Number(newWac.toFixed(4));
-    
-    runningState.set(item.productId, { qty: newQty, wac: newWac });
-
-    const movementId = `${params.referenceId}_${lineIdentifier}_out`;
-    movementsToWrite.push({
-      ref: doc(db, INVENTORY_MOVEMENTS_COLLECTION, movementId),
-      data: {
-        productId: item.productId,
-        warehouseId: params.warehouseId,
-        type: params.type,
-        flow: 'out',
-        quantityIn: 0,
-        quantityOut: item.quantity,
-        balanceAfter: newQty,
-        unitCost: movementHistoricalCost,
-        averageCostAfter: newWac,
-        referenceType: params.referenceType,
-        referenceId: params.referenceId,
-        sourceLineId: lineIdentifier,
-        description: params.description || '',
-        createdBy: params.createdBy,
-        createdAt: now as unknown as Date,
-        updatedAt: now as unknown as Date,
-      }
-    });
-
-    const inventoryItemId = `${params.warehouseId}_${item.productId}`;
-    itemsToWrite.set(item.productId, {
-      ref: doc(db, INVENTORY_ITEMS_COLLECTION, inventoryItemId),
-      data: {
-        quantity: newQty,
-        wac: newWac,
-        inventoryValue: Number((newQty * newWac).toFixed(4)),
-        lastUpdatedAt: now as unknown as Date,
-      }
-    });
-  }
-
-  // --- مرحلة 3: الكتابات النهائية (Writes) ---
-  for (const mov of movementsToWrite) {
-    transaction.set(mov.ref, mov.data);
-  }
-  itemsToWrite.forEach((itemOps) => {
-    transaction.update(itemOps.ref, itemOps.data);
-  });
-};
-
-
-export const processWarehouseTransferInTransaction = async (transaction: Transaction, params: TransferOperationParams): Promise<void> => {
-  if (params.sourceWarehouseId === params.destWarehouseId) {
-    throw new Error('لا يمكن التحويل لنفس المخزن');
-  }
-  if (!params.items || params.items.length === 0) throw new Error('لا توجد أصناف للتحويل');
-
-  for (const item of params.items) validateNumber(item.quantity, 'كمية التحويل');
-
-  const now = Timestamp.now();
-  const uniqueProductIds = Array.from(new Set(params.items.map(i => i.productId)));
-
-  // --- مرحلة 1: القراءات (Reads) ---
-  const movementOutSnaps = new Map<string, any>();
-  const movementInSnaps = new Map<string, any>();
+  const generatedMovementId = generateMovementId(params.referenceType, params.referenceId, 'in', params.sourceLineId);
   
-  for (let i = 0; i < params.items.length; i++) {
-    const lineIdentifier = params.items[i].lineId || `idx_${i}`;
-    const transferOutId = `${params.transferId}_${lineIdentifier}_out`;
-    const transferInId = `${params.transferId}_${lineIdentifier}_in`;
-    
-    movementOutSnaps.set(lineIdentifier, await transaction.get(doc(db, INVENTORY_MOVEMENTS_COLLECTION, transferOutId)));
-    movementInSnaps.set(lineIdentifier, await transaction.get(doc(db, INVENTORY_MOVEMENTS_COLLECTION, transferInId)));
-  }
+  const movementRef = doc(db, MOVEMENTS_COLLECTION, generatedMovementId);
+  const itemRef = doc(db, INVENTORY_COLLECTION, `${params.warehouseId}_${params.productId}`);
 
-  const sourceItemSnaps = new Map<string, any>();
-  const destItemSnaps = new Map<string, any>();
+  // Sequential Reads
+  const movementSnap = await transaction.get(movementRef);
+  const itemSnap = await transaction.get(itemRef);
 
-  for (const productId of uniqueProductIds) {
-    const sourceItemId = `${params.sourceWarehouseId}_${productId}`;
-    const destItemId = `${params.destWarehouseId}_${productId}`;
-    sourceItemSnaps.set(productId, await transaction.get(doc(db, INVENTORY_ITEMS_COLLECTION, sourceItemId)));
-    destItemSnaps.set(productId, await transaction.get(doc(db, INVENTORY_ITEMS_COLLECTION, destItemId)));
-  }
-
-  // --- مرحلة 2: الحسابات التراكمية (In-Memory Running State) ---
-  const sourceRunningState = new Map<string, { qty: number; wac: number }>();
-  const destRunningState = new Map<string, { qty: number; wac: number }>();
-
-  for (const productId of uniqueProductIds) {
-    const sSnap = sourceItemSnaps.get(productId);
-    if (!sSnap || !sSnap.exists()) throw new Error(`الصنف غير موجود في المخزن المصدر (${productId})`);
-    const sData = sSnap.data() as InventoryItem;
-    sourceRunningState.set(productId, {
-      qty: Number.isFinite(sData.quantity) ? sData.quantity : 0,
-      wac: Number.isFinite(sData.wac) ? sData.wac : 0,
-    });
-
-    const dSnap = destItemSnaps.get(productId);
-    if (dSnap && dSnap.exists()) {
-      const dData = dSnap.data() as InventoryItem;
-      destRunningState.set(productId, {
-        qty: Number.isFinite(dData.quantity) ? dData.quantity : 0,
-        wac: Number.isFinite(dData.wac) ? dData.wac : 0,
-      });
+  // Idempotency Check
+  if (movementSnap.exists()) {
+    const existingMove = movementSnap.data() as InventoryMovement;
+    if (
+      existingMove.productId === params.productId &&
+      existingMove.warehouseId === params.warehouseId &&
+      existingMove.quantityIn === params.quantity &&
+      existingMove.referenceType === params.referenceType &&
+      existingMove.referenceId === params.referenceId &&
+      existingMove.sourceLineId === params.sourceLineId
+    ) {
+      return { isIdempotent: true, movementRef, itemRef };
     } else {
-      destRunningState.set(productId, { qty: 0, wac: 0 });
+      throw new Error(`معرف الحركة مستخدم بالفعل لمعاملة إدخال مخزني أخرى بتفاصيل مختلفة (${generatedMovementId})`);
     }
   }
 
-  const movementsToWrite: Array<{ ref: any; data: InventoryMovementWithLine }> = [];
-  const sourceItemsToWrite = new Map<string, { ref: any; data: Partial<InventoryItem> }>();
-  const destItemsToWrite = new Map<string, { ref: any; data: InventoryItem }>();
+  const now = Timestamp.now();
+  let oldQuantity = 0;
+  let oldWac = 0;
+  const isNewItem = !itemSnap.exists();
 
-  for (let i = 0; i < params.items.length; i++) {
-    const item = params.items[i];
-    const lineIdentifier = item.lineId || `idx_${i}`;
-    
-    const outExists = movementOutSnaps.get(lineIdentifier)?.exists();
-    const inExists = movementInSnaps.get(lineIdentifier)?.exists();
-    
-    if (outExists && inExists) {
-      continue;
-    }
-    
-    if (outExists !== inExists) {
-      throw new Error(`حالة تحويل غير متسقة للسطر ${lineIdentifier}: يجب أن تكون حركتا التحويل الصادر والوارد موجودتين معًا أو غير موجودتين معًا.`);
-    }
-
-    // معالجة المصدر (Out)
-    const currentSourceState = sourceRunningState.get(item.productId)!;
-    if (currentSourceState.qty < item.quantity) {
-      throw new Error(`رصيد المخزن المصدر غير كافٍ للصنف. المتاح: ${currentSourceState.qty}`);
-    }
-
-    const newSourceQty = currentSourceState.qty - item.quantity;
-    const transferCost = currentSourceState.wac; 
-    
-    sourceRunningState.set(item.productId, { qty: newSourceQty, wac: transferCost });
-
-    // معالجة المستقبل (In)
-    const currentDestState = destRunningState.get(item.productId)!;
-    const newDestQty = currentDestState.qty + item.quantity;
-    let newDestWac = 0;
-    
-    const totalOldDestValue = currentDestState.qty * currentDestState.wac;
-    const transferredValue = item.quantity * transferCost;
-    
-    if (newDestQty > 0) {
-      newDestWac = (totalOldDestValue + transferredValue) / newDestQty;
-    }
-    
-    if (!Number.isFinite(newDestWac) || newDestWac < 0) throw new Error('خلل محاسبي أثناء حساب تكلفة التحويل');
-    newDestWac = Number(newDestWac.toFixed(4));
-
-    destRunningState.set(item.productId, { qty: newDestQty, wac: newDestWac });
-
-    const transferOutId = `${params.transferId}_${lineIdentifier}_out`;
-    const transferInId = `${params.transferId}_${lineIdentifier}_in`;
-
-    movementsToWrite.push({
-      ref: doc(db, INVENTORY_MOVEMENTS_COLLECTION, transferOutId),
-      data: {
-        productId: item.productId,
-        warehouseId: params.sourceWarehouseId,
-        type: 'transfer_out',
-        flow: 'out',
-        quantityIn: 0,
-        quantityOut: item.quantity,
-        balanceAfter: newSourceQty,
-        unitCost: transferCost,
-        averageCostAfter: transferCost,
-        referenceType: 'transfer',
-        referenceId: params.transferId,
-        transferId: params.transferId,
-        sourceLineId: lineIdentifier,
-        description: params.description || 'تحويل صادر',
-        createdBy: params.createdBy,
-        createdAt: now as unknown as Date,
-        updatedAt: now as unknown as Date,
-      }
-    });
-
-    movementsToWrite.push({
-      ref: doc(db, INVENTORY_MOVEMENTS_COLLECTION, transferInId),
-      data: {
-        productId: item.productId,
-        warehouseId: params.destWarehouseId,
-        type: 'transfer_in',
-        flow: 'in',
-        quantityIn: item.quantity,
-        quantityOut: 0,
-        balanceAfter: newDestQty,
-        unitCost: transferCost,
-        averageCostAfter: newDestWac,
-        referenceType: 'transfer',
-        referenceId: params.transferId,
-        transferId: params.transferId,
-        sourceLineId: lineIdentifier,
-        description: params.description || 'تحويل وارد',
-        createdBy: params.createdBy,
-        createdAt: now as unknown as Date,
-        updatedAt: now as unknown as Date,
-      }
-    });
-
-    sourceItemsToWrite.set(item.productId, {
-      ref: doc(db, INVENTORY_ITEMS_COLLECTION, `${params.sourceWarehouseId}_${item.productId}`),
-      data: {
-        quantity: newSourceQty,
-        inventoryValue: Number((newSourceQty * transferCost).toFixed(4)),
-        lastUpdatedAt: now as unknown as Date,
-      }
-    });
-
-    const destItemId = `${params.destWarehouseId}_${item.productId}`;
-    destItemsToWrite.set(item.productId, {
-      ref: doc(db, INVENTORY_ITEMS_COLLECTION, destItemId),
-      data: {
-        id: destItemId,
-        productId: item.productId,
-        warehouseId: params.destWarehouseId,
-        quantity: newDestQty,
-        wac: newDestWac,
-        inventoryValue: Number((newDestQty * newDestWac).toFixed(4)),
-        lastUpdatedAt: now as unknown as Date,
-      }
-    });
+  if (!isNewItem) {
+    const currentItem = itemSnap.data() as InventoryItem;
+    oldQuantity = Number.isFinite(currentItem.quantity) ? currentItem.quantity : 0;
+    oldWac = Number.isFinite(currentItem.wac) ? currentItem.wac : 0;
   }
 
-  // --- مرحلة 3: الكتابات النهائية (Writes) ---
-  for (const mov of movementsToWrite) transaction.set(mov.ref, mov.data);
-  sourceItemsToWrite.forEach(op => transaction.update(op.ref, op.data));
-  destItemsToWrite.forEach(op => transaction.set(op.ref, op.data, { merge: true }));
+  const newQuantity = Number((oldQuantity + params.quantity).toFixed(4));
+  
+  // WAC Calculation
+  let newWac = params.unitCost;
+  if (newQuantity > 0) {
+    const totalOldValue = oldQuantity * oldWac;
+    const totalNewValue = params.quantity * params.unitCost;
+    newWac = Number(((totalOldValue + totalNewValue) / newQuantity).toFixed(4));
+  }
+  
+  const newInventoryValue = Number((newQuantity * newWac).toFixed(4));
+
+  const movementData: Omit<InventoryMovement, 'id'> = {
+    productId: params.productId,
+    warehouseId: params.warehouseId,
+    type: params.referenceType === 'purchase_return' ? 'purchase_return' : (params.referenceType === 'transfer' ? 'transfer_in' : 'stock_in'),
+    flow: 'in',
+    quantityIn: params.quantity,
+    quantityOut: 0,
+    balanceAfter: newQuantity,
+    unitCost: params.unitCost,
+    averageCostAfter: newWac,
+    referenceType: params.referenceType,
+    referenceId: params.referenceId,
+    sourceLineId: params.sourceLineId,
+    description: params.description || '',
+    createdBy: params.createdBy,
+    createdAt: now as unknown as Date,
+    updatedAt: now as unknown as Date,
+  };
+
+  const itemData = isNewItem 
+    ? {
+        productId: params.productId,
+        warehouseId: params.warehouseId,
+        quantity: newQuantity,
+        wac: newWac,
+        inventoryValue: newInventoryValue,
+        lastUpdatedAt: now as unknown as Date
+      } 
+    : {
+        quantity: newQuantity,
+        wac: newWac,
+        inventoryValue: newInventoryValue,
+        lastUpdatedAt: now as unknown as Date
+      };
+
+  return {
+    isIdempotent: false,
+    movementRef,
+    movementData,
+    itemRef,
+    itemData,
+    isNewItem
+  };
 };
 
 // ==========================================
-// 2. Public Wrappers (Phase 2 Compatibility)
+// 5. Stock In (Write/Commit Phase)
+// ==========================================
+
+export const commitStockInInTransaction = (
+  transaction: FirestoreTransaction,
+  prepared: PreparedStockIn
+): void => {
+  if (prepared.isIdempotent) return;
+
+  if (prepared.movementData && prepared.itemData) {
+    transaction.set(prepared.movementRef, prepared.movementData);
+    
+    if (prepared.isNewItem) {
+      transaction.set(prepared.itemRef, prepared.itemData);
+    } else {
+      transaction.update(prepared.itemRef, prepared.itemData);
+    }
+  }
+};
+
+// ==========================================
+// 6. Stock Out (Read/Prepare Phase)
+// ==========================================
+
+export const prepareStockOutInTransaction = async (
+  transaction: FirestoreTransaction,
+  params: ProcessStockOutParams
+): Promise<PreparedStockOut> => {
+  if (!params.productId || !params.warehouseId) throw new Error("معرف المنتج والمخزن مطلوبان.");
+  validateQuantity(params.quantity);
+
+  const generatedMovementId = generateMovementId(params.referenceType, params.referenceId, 'out', params.sourceLineId);
+  
+  const movementRef = doc(db, MOVEMENTS_COLLECTION, generatedMovementId);
+  const itemRef = doc(db, INVENTORY_COLLECTION, `${params.warehouseId}_${params.productId}`);
+
+  // Sequential Reads
+  const movementSnap = await transaction.get(movementRef);
+  const itemSnap = await transaction.get(itemRef);
+
+  // Idempotency Check
+  if (movementSnap.exists()) {
+    const existingMove = movementSnap.data() as InventoryMovement;
+    if (
+      existingMove.productId === params.productId &&
+      existingMove.warehouseId === params.warehouseId &&
+      existingMove.quantityOut === params.quantity &&
+      existingMove.referenceType === params.referenceType &&
+      existingMove.referenceId === params.referenceId &&
+      existingMove.sourceLineId === params.sourceLineId
+    ) {
+      return { isIdempotent: true, movementRef, itemRef };
+    } else {
+      throw new Error(`معرف الحركة مستخدم بالفعل لمعاملة إخراج مخزني أخرى بتفاصيل مختلفة (${generatedMovementId})`);
+    }
+  }
+
+  if (!itemSnap.exists()) {
+    throw new Error(`المنتج غير موجود في هذا المخزن للسحب منه. (${params.productId})`);
+  }
+
+  const currentItem = itemSnap.data() as InventoryItem;
+  const currentQuantity = Number.isFinite(currentItem.quantity) ? currentItem.quantity : 0;
+  const currentWac = Number.isFinite(currentItem.wac) ? currentItem.wac : 0;
+
+  if (currentQuantity < params.quantity) {
+    throw new Error(`الرصيد المتاح لا يكفي. المتاح: ${currentQuantity}, المطلوب: ${params.quantity}`);
+  }
+
+  const newQuantity = Number((currentQuantity - params.quantity).toFixed(4));
+  const newInventoryValue = Number((newQuantity * currentWac).toFixed(4));
+  const now = Timestamp.now();
+
+  const movementData: Omit<InventoryMovement, 'id'> = {
+    productId: params.productId,
+    warehouseId: params.warehouseId,
+    type: params.referenceType === 'transfer' ? 'transfer_out' : 'stock_out',
+    flow: 'out',
+    quantityIn: 0,
+    quantityOut: params.quantity,
+    balanceAfter: newQuantity,
+    unitCost: currentWac, // السحب يتم بمتوسط التكلفة الحالي ولا يغيره
+    averageCostAfter: currentWac,
+    referenceType: params.referenceType,
+    referenceId: params.referenceId,
+    sourceLineId: params.sourceLineId,
+    description: params.description || '',
+    createdBy: params.createdBy,
+    createdAt: now as unknown as Date,
+    updatedAt: now as unknown as Date,
+  };
+
+  const itemUpdateData = {
+    quantity: newQuantity,
+    inventoryValue: newInventoryValue,
+    lastUpdatedAt: now as unknown as Date
+  };
+
+  return {
+    isIdempotent: false,
+    movementRef,
+    movementData,
+    itemRef,
+    itemUpdateData
+  };
+};
+
+// ==========================================
+// 7. Stock Out (Write/Commit Phase)
+// ==========================================
+
+export const commitStockOutInTransaction = (
+  transaction: FirestoreTransaction,
+  prepared: PreparedStockOut
+): void => {
+  if (prepared.isIdempotent) return;
+
+  if (prepared.movementData && prepared.itemUpdateData) {
+    transaction.set(prepared.movementRef, prepared.movementData);
+    transaction.update(prepared.itemRef, prepared.itemUpdateData);
+  }
+};
+
+// ==========================================
+// 8. Warehouse Transfer (Read/Prepare Phase)
+// ==========================================
+
+export const prepareWarehouseTransferInTransaction = async (
+  transaction: FirestoreTransaction,
+  params: ProcessWarehouseTransferParams
+): Promise<PreparedWarehouseTransfer> => {
+  if (!params.productId || !params.sourceWarehouseId || !params.destWarehouseId) {
+    throw new Error("بيانات النقل (المنتج، المخزن المصدر، المخزن المستلم) غير مكتملة.");
+  }
+  if (params.sourceWarehouseId === params.destWarehouseId) {
+    throw new Error("لا يمكن النقل لنفس المخزن.");
+  }
+  validateQuantity(params.quantity);
+
+  const outMovementRef = doc(db, MOVEMENTS_COLLECTION, `mov_transfer_${params.transferId}_${params.sourceLineId || params.productId}_out`);
+  const inMovementRef = doc(db, MOVEMENTS_COLLECTION, `mov_transfer_${params.transferId}_${params.sourceLineId || params.productId}_in`);
+  
+  const sourceItemRef = doc(db, INVENTORY_COLLECTION, `${params.sourceWarehouseId}_${params.productId}`);
+  const destItemRef = doc(db, INVENTORY_COLLECTION, `${params.destWarehouseId}_${params.productId}`);
+
+  // Sequential Reads
+  const outMovementSnap = await transaction.get(outMovementRef);
+  const inMovementSnap = await transaction.get(inMovementRef);
+  const sourceItemSnap = await transaction.get(sourceItemRef);
+  const destItemSnap = await transaction.get(destItemRef);
+
+  const outExists = outMovementSnap.exists();
+  const inExists = inMovementSnap.exists();
+
+  // Strict & Deep Idempotency Check
+  if (outExists && inExists) {
+    const outMove = outMovementSnap.data() as InventoryMovement;
+    const inMove = inMovementSnap.data() as InventoryMovement;
+
+    const isOutMatch = 
+      outMove.referenceId === params.transferId &&
+      outMove.productId === params.productId &&
+      outMove.warehouseId === params.sourceWarehouseId &&
+      outMove.sourceLineId === params.sourceLineId &&
+      outMove.quantityOut === params.quantity &&
+      outMove.type === 'transfer_out';
+
+    const isInMatch = 
+      inMove.referenceId === params.transferId &&
+      inMove.productId === params.productId &&
+      inMove.warehouseId === params.destWarehouseId &&
+      inMove.sourceLineId === params.sourceLineId &&
+      inMove.quantityIn === params.quantity &&
+      inMove.type === 'transfer_in';
+
+    if (isOutMatch && isInMatch) {
+      return { 
+        isIdempotent: true, 
+        outMovementRef, 
+        inMovementRef, 
+        sourceItemRef, 
+        destItemRef 
+      };
+    } else {
+      throw new Error(`رقم التحويل (${params.transferId}) مستخدم لعملية نقل أخرى بتفاصيل مختلفة.`);
+    }
+  }
+
+  if (outExists !== inExists) {
+    throw new Error("حالة النقل المخزني غير متسقة. يرجى مراجعة الدعم.");
+  }
+
+  if (!sourceItemSnap.exists()) {
+    throw new Error(`المنتج غير موجود في المخزن المصدر للسحب منه.`);
+  }
+
+  const sourceItem = sourceItemSnap.data() as InventoryItem;
+  const sourceQuantity = Number.isFinite(sourceItem.quantity) ? sourceItem.quantity : 0;
+  
+  // تكلفة الوحدة المنقولة إلى المخزن المستلم هي WAC الحالي للمخزن المصدر، 
+  // ثم يتم استخدام هذه التكلفة لحساب WAC الجديد في المخزن المستلم.
+  const sourceWac = Number.isFinite(sourceItem.wac) ? sourceItem.wac : 0; 
+
+  if (sourceQuantity < params.quantity) {
+    throw new Error(`رصيد المخزن المصدر لا يكفي. المتاح: ${sourceQuantity}, المطلوب: ${params.quantity}`);
+  }
+
+  const now = Timestamp.now();
+  const newSourceQuantity = Number((sourceQuantity - params.quantity).toFixed(4));
+  const newSourceInventoryValue = Number((newSourceQuantity * sourceWac).toFixed(4));
+
+  // Dest item calculations
+  const isNewDestItem = !destItemSnap.exists();
+  let destQuantity = 0;
+  let destWac = 0;
+
+  if (!isNewDestItem) {
+    const destItem = destItemSnap.data() as InventoryItem;
+    destQuantity = Number.isFinite(destItem.quantity) ? destItem.quantity : 0;
+    destWac = Number.isFinite(destItem.wac) ? destItem.wac : 0;
+  }
+
+  const newDestQuantity = Number((destQuantity + params.quantity).toFixed(4));
+  
+  // Dest WAC Calculation
+  let newDestWac = sourceWac;
+  if (newDestQuantity > 0) {
+    const totalOldValue = destQuantity * destWac;
+    const totalNewValue = params.quantity * sourceWac;
+    newDestWac = Number(((totalOldValue + totalNewValue) / newDestQuantity).toFixed(4));
+  }
+
+  const newDestInventoryValue = Number((newDestQuantity * newDestWac).toFixed(4));
+
+  const outMovementData: Omit<InventoryMovement, 'id'> = {
+    productId: params.productId,
+    warehouseId: params.sourceWarehouseId,
+    type: 'transfer_out',
+    flow: 'out',
+    quantityIn: 0,
+    quantityOut: params.quantity,
+    balanceAfter: newSourceQuantity,
+    unitCost: sourceWac,
+    averageCostAfter: sourceWac,
+    referenceType: 'transfer',
+    referenceId: params.transferId,
+    transferId: params.transferId,
+    sourceLineId: params.sourceLineId,
+    description: params.description || `تحويل صادر إلى مخزن ${params.destWarehouseId}`,
+    createdBy: params.createdBy,
+    createdAt: now as unknown as Date,
+    updatedAt: now as unknown as Date,
+  };
+
+  const inMovementData: Omit<InventoryMovement, 'id'> = {
+    productId: params.productId,
+    warehouseId: params.destWarehouseId,
+    type: 'transfer_in',
+    flow: 'in',
+    quantityIn: params.quantity,
+    quantityOut: 0,
+    balanceAfter: newDestQuantity,
+    unitCost: sourceWac,
+    averageCostAfter: newDestWac,
+    referenceType: 'transfer',
+    referenceId: params.transferId,
+    transferId: params.transferId,
+    sourceLineId: params.sourceLineId,
+    description: params.description || `تحويل وارد من مخزن ${params.sourceWarehouseId}`,
+    createdBy: params.createdBy,
+    createdAt: now as unknown as Date,
+    updatedAt: now as unknown as Date,
+  };
+
+  const sourceItemUpdateData = {
+    quantity: newSourceQuantity,
+    inventoryValue: newSourceInventoryValue,
+    lastUpdatedAt: now as unknown as Date
+  };
+
+  const destItemData = isNewDestItem 
+    ? {
+        productId: params.productId,
+        warehouseId: params.destWarehouseId,
+        quantity: newDestQuantity,
+        wac: newDestWac,
+        inventoryValue: newDestInventoryValue,
+        lastUpdatedAt: now as unknown as Date
+      }
+    : {
+        quantity: newDestQuantity,
+        wac: newDestWac,
+        inventoryValue: newDestInventoryValue,
+        lastUpdatedAt: now as unknown as Date
+      };
+
+  return {
+    isIdempotent: false,
+    outMovementRef,
+    outMovementData,
+    inMovementRef,
+    inMovementData,
+    sourceItemRef,
+    sourceItemUpdateData,
+    destItemRef,
+    destItemData,
+    isNewDestItem
+  };
+};
+
+// ==========================================
+// 9. Warehouse Transfer (Write/Commit Phase)
+// ==========================================
+
+export const commitWarehouseTransferInTransaction = (
+  transaction: FirestoreTransaction,
+  prepared: PreparedWarehouseTransfer
+): void => {
+  if (prepared.isIdempotent) return;
+
+  if (prepared.outMovementData && prepared.inMovementData && prepared.sourceItemUpdateData && prepared.destItemData) {
+    transaction.set(prepared.outMovementRef, prepared.outMovementData);
+    transaction.set(prepared.inMovementRef, prepared.inMovementData);
+    
+    transaction.update(prepared.sourceItemRef, prepared.sourceItemUpdateData);
+    
+    if (prepared.isNewDestItem) {
+      transaction.set(prepared.destItemRef, prepared.destItemData);
+    } else {
+      transaction.update(prepared.destItemRef, prepared.destItemData);
+    }
+  }
+};
+
+// ==========================================
+// 10. Backward Compatibility Orchestrators (Supports Both APIs)
+// ==========================================
+
+export const processStockInInTransaction = async (
+  transaction: FirestoreTransaction,
+  params: ProcessStockInParams | StockOperationParams
+): Promise<void> => {
+  if ('items' in params) {
+    // Array API (Phase 1 & 2): Collect all reads first, then write all.
+    const prepares: PreparedStockIn[] = [];
+    for (const item of params.items) {
+      prepares.push(await prepareStockInInTransaction(transaction, {
+        productId: item.productId,
+        warehouseId: params.warehouseId,
+        quantity: item.quantity,
+        unitCost: item.unitCost || 0,
+        referenceType: params.referenceType,
+        referenceId: params.referenceId,
+        sourceLineId: item.sourceLineId,
+        description: params.description,
+        createdBy: params.createdBy
+      }));
+    }
+    for (const prepared of prepares) {
+      commitStockInInTransaction(transaction, prepared);
+    }
+  } else {
+    // Single Item API (Phase 3)
+    const prepared = await prepareStockInInTransaction(transaction, params);
+    commitStockInInTransaction(transaction, prepared);
+  }
+};
+
+export const processStockOutInTransaction = async (
+  transaction: FirestoreTransaction,
+  params: ProcessStockOutParams | StockOperationParams
+): Promise<void> => {
+  if ('items' in params) {
+    const prepares: PreparedStockOut[] = [];
+    for (const item of params.items) {
+      prepares.push(await prepareStockOutInTransaction(transaction, {
+        productId: item.productId,
+        warehouseId: params.warehouseId,
+        quantity: item.quantity,
+        referenceType: params.referenceType,
+        referenceId: params.referenceId,
+        sourceLineId: item.sourceLineId,
+        description: params.description,
+        createdBy: params.createdBy
+      }));
+    }
+    for (const prepared of prepares) {
+      commitStockOutInTransaction(transaction, prepared);
+    }
+  } else {
+    const prepared = await prepareStockOutInTransaction(transaction, params);
+    commitStockOutInTransaction(transaction, prepared);
+  }
+};
+
+export const processWarehouseTransferInTransaction = async (
+  transaction: FirestoreTransaction,
+  params: ProcessWarehouseTransferParams | TransferOperationParams
+): Promise<void> => {
+  if ('items' in params) {
+    const prepares: PreparedWarehouseTransfer[] = [];
+    const transferId = params.transferId || doc(collection(db, MOVEMENTS_COLLECTION)).id;
+    for (const item of params.items) {
+      prepares.push(await prepareWarehouseTransferInTransaction(transaction, {
+        productId: item.productId,
+        sourceWarehouseId: params.sourceWarehouseId,
+        destWarehouseId: params.destWarehouseId,
+        quantity: item.quantity,
+        transferId: transferId,
+        sourceLineId: item.sourceLineId,
+        description: params.description,
+        createdBy: params.createdBy
+      }));
+    }
+    for (const prepared of prepares) {
+      commitWarehouseTransferInTransaction(transaction, prepared);
+    }
+  } else {
+    const prepared = await prepareWarehouseTransferInTransaction(transaction, params);
+    commitWarehouseTransferInTransaction(transaction, prepared);
+  }
+};
+
+// ==========================================
+// 11. Public Wrappers (For UI & Stores)
 // ==========================================
 
 export const processStockIn = async (params: StockOperationParams): Promise<void> => {
@@ -507,14 +690,13 @@ export const processWarehouseTransfer = async (params: TransferOperationParams):
 };
 
 // ==========================================
-// 3. Read-Only Public Functions
+// 12. Read-Only Public Functions
 // ==========================================
 
 export const getWarehouseStock = async (warehouseId: string): Promise<InventoryItem[]> => {
   const q = query(
-    collection(db, INVENTORY_ITEMS_COLLECTION),
-    where('warehouseId', '==', warehouseId),
-    where('quantity', '>', 0)
+    collection(db, INVENTORY_COLLECTION), 
+    where('warehouseId', '==', warehouseId)
   );
   
   const snapshot = await getDocs(q);
@@ -530,7 +712,7 @@ export const getWarehouseStock = async (warehouseId: string): Promise<InventoryI
 
 export const getItemLedger = async (warehouseId: string, productId: string): Promise<InventoryMovement[]> => {
   const q = query(
-    collection(db, INVENTORY_MOVEMENTS_COLLECTION),
+    collection(db, MOVEMENTS_COLLECTION),
     where('warehouseId', '==', warehouseId),
     where('productId', '==', productId),
     orderBy('createdAt', 'desc')
