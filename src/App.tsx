@@ -1,74 +1,91 @@
-import { useEffect } from "react";
-import { HashRouter, Routes, Route, Navigate } from "react-router-dom";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { onAuthStateChanged } from "firebase/auth";
-import { auth } from "./config/firebase";
-import { useAuthStore } from "./store/authStore";
+import React, { useEffect } from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { onAuthStateChanged } from 'firebase/auth';
+import { auth } from './config/firebase';
+import { useAuthStore } from './store/authStore';
 
-import MainLayout from "./layouts/MainLayout";
-import Login from "./pages/auth/Login";
-import ProtectedRoute from "./components/auth/ProtectedRoute";
-import Warehouses from "./pages/master-data/Warehouses";
-import WarehouseDetails from "./pages/master-data/WarehouseDetails";
-import Cashboxes from "./pages/master-data/Cashboxes";
-import CashboxDetails from "./pages/master-data/CashboxDetails";
-import Categories from "./pages/master-data/Categories";
-import Products from "./pages/master-data/Products";
+// Layouts
+import MainLayout from './layouts/MainLayout';
 
-// تهيئة عميل React Query لإدارة استدعاءات البيانات
-const queryClient = new QueryClient();
+// Pages - Auth
+import Login from './pages/auth/Login';
+import ProtectedRoute from './components/auth/ProtectedRoute';
 
-// مكون مؤقت للصفحة الرئيسية
-const DashboardPlaceholder = () => (
-  <div className="flex flex-col items-center justify-center h-full text-muted-foreground animate-in fade-in duration-500">
-    <h2 className="text-2xl font-bold mb-2 text-foreground font-mono tracking-wider">مرحباً بك في نظام EL3NANY ERP</h2>
-    <p>لقد قمت بتسجيل الدخول بنجاح وأنت الآن داخل المنطقة المحمية.</p>
-  </div>
-);
+// Pages - Master Data
+import Products from './pages/master-data/Products';
+import Warehouses from './pages/master-data/Warehouses';
+import Cashboxes from './pages/master-data/Cashboxes';
+import CashboxDetails from './pages/master-data/CashboxDetails';
+import WarehouseDetails from './pages/master-data/WarehouseDetails';
+import Categories from './pages/master-data/Categories';
 
-function App() {
-  const { setUser, setLoading } = useAuthStore();
+// Pages - Purchases & Suppliers (Phase 3)
+import Suppliers from './pages/purchases/Suppliers';
+import SupplierDetails from './pages/purchases/SupplierDetails';
+import PurchasesList from './pages/purchases/PurchasesList';
+import NewPurchaseInvoice from './pages/purchases/NewPurchaseInvoice';
+import PurchaseDetails from './pages/purchases/PurchaseDetails';
+import PurchaseReturn from './pages/PurchaseReturn';
+
+// Simple Dashboard Placeholder (Existing)
+const Dashboard = () => {
+  return (
+    <div className="p-6">
+      <h1 className="text-2xl font-bold text-gray-800 mb-4">لوحة القيادة</h1>
+      <p className="text-gray-600">مرحباً بك في نظام العناني ERP.</p>
+    </div>
+  );
+};
+
+export function App() {
+  const { setUser, setAuthReady, isAuthReady } = useAuthStore();
 
   useEffect(() => {
-    // التنصت على حالة تسجيل الدخول من فايربيز بمجرد تشغيل التطبيق
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-      setLoading(false); // إيقاف شاشة التحميل بمجرد معرفة الحالة (سواء مسجل أو غير مسجل)
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setUser(user);
+      setAuthReady(true);
     });
 
-    // تنظيف التنصت عند إغلاق المكون لتجنب تسريب الذاكرة
     return () => unsubscribe();
-  }, [setUser, setLoading]);
+  }, [setUser, setAuthReady]);
+
+  if (!isAuthReady) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+      </div>
+    );
+  }
 
   return (
-    <QueryClientProvider client={queryClient}>
-      <HashRouter>
-        <Routes>
-          {/* مسار عام: شاشة تسجيل الدخول */}
-          <Route path="/login" element={<Login />} />
+    <Router>
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        
+        <Route element={<ProtectedRoute><MainLayout /></ProtectedRoute>}>
+          <Route path="/" element={<Dashboard />} />
+          
+          {/* Master Data Routes */}
+          <Route path="/products" element={<Products />} />
+          <Route path="/categories" element={<Categories />} />
+          <Route path="/warehouses" element={<Warehouses />} />
+          <Route path="/warehouses/:id" element={<WarehouseDetails />} />
+          <Route path="/cashboxes" element={<Cashboxes />} />
+          <Route path="/cashboxes/:id" element={<CashboxDetails />} />
 
-          {/* مسارات محمية: لا يمكن الدخول لها إلا بتسجيل الدخول */}
-          <Route element={<ProtectedRoute />}>
-            <Route path="/" element={<MainLayout />}>
-              <Route index element={<DashboardPlaceholder />} />
-              
-              {/* شاشات البيانات الأساسية (Master Data) */}
-              <Route path="warehouses" element={<Warehouses />} />
-              <Route path="warehouses/:id" element={<WarehouseDetails />} />
-              <Route path="categories" element={<Categories />} />
-              <Route path="products" element={<Products />} />
-              <Route path="cashboxes" element={<Cashboxes />} />
-              <Route path="cashboxes/:id" element={<CashboxDetails />} />
-              
-              {/* سيتم إضافة شاشات (الفواتير) هنا تباعاً */}
-            </Route>
-          </Route>
+          {/* Phase 3: Suppliers & Purchases Routes */}
+          <Route path="/suppliers" element={<Suppliers />} />
+          <Route path="/suppliers/:id" element={<SupplierDetails />} />
+          
+          <Route path="/purchases" element={<PurchasesList />} />
+          <Route path="/purchases/new" element={<NewPurchaseInvoice />} />
+          <Route path="/purchases/return" element={<PurchaseReturn />} />
+          <Route path="/purchases/:id" element={<PurchaseDetails />} />
+        </Route>
 
-          {/* في حال كتابة مسار غير موجود، يتم إرجاع المستخدم للرئيسية */}
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </HashRouter>
-    </QueryClientProvider>
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </Router>
   );
 }
 
