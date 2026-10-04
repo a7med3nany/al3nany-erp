@@ -31,13 +31,13 @@ const PurchaseDetails: React.FC = () => {
   const { 
     warehouses, 
     isLoading: isWarehousesLoading, 
-    loadWarehouses 
+    fetchWarehouses 
   } = useWarehouseStore();
   
   const { 
     products, 
     isLoading: isProductsLoading, 
-    loadProducts 
+    fetchProducts 
   } = useProductStore();
 
   // Initial Data Load & Cleanup
@@ -46,15 +46,15 @@ const PurchaseDetails: React.FC = () => {
       clearCurrentInvoice(); // لمنع ظهور بيانات فاتورة سابقة أثناء التحميل
       loadPurchaseInvoice(id);
       loadSuppliers();
-      loadWarehouses();
-      loadProducts();
+      fetchWarehouses();
+      fetchProducts();
     }
     
     // Cleanup on unmount
     return () => {
       clearCurrentInvoice();
     };
-  }, [id, loadPurchaseInvoice, loadSuppliers, loadWarehouses, loadProducts, clearCurrentInvoice]);
+  }, [id, loadPurchaseInvoice, loadSuppliers, fetchWarehouses, fetchProducts, clearCurrentInvoice]);
 
   // Helper Functions for Data Mapping
   const getSupplierName = (supplierId: string) => {
