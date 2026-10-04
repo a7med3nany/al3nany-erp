@@ -1,3 +1,7 @@
+**ملخص التعديل:**
+تم إضافة مسار Route جديد لصفحة "تسجيل دفعة المورد" (SupplierPayment) لتكون ضمن مجموعة المسارات المحمية ProtectedRoute وداخل الـ MainLayout، بحيث يمكن الوصول إليها عبر المسار /suppliers/:id/payment كما هو مطلوب.
+إليك الملف الكامل والنهائي **src/App.tsx**:
+```typescript
 import React, { useEffect } from 'react';
 import { HashRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { onAuthStateChanged } from 'firebase/auth';
@@ -22,6 +26,7 @@ import Categories from './pages/master-data/Categories';
 // Pages - Purchases & Suppliers (Phase 3)
 import Suppliers from './pages/purchases/Suppliers';
 import SupplierDetails from './pages/purchases/SupplierDetails';
+import SupplierPayment from './pages/purchases/SupplierPayment';
 import PurchasesList from './pages/purchases/PurchasesList';
 import NewPurchaseInvoice from './pages/purchases/NewPurchaseInvoice';
 import PurchaseDetails from './pages/purchases/PurchaseDetails';
@@ -83,6 +88,7 @@ export function App() {
             {/* Phase 3: Suppliers & Purchases Routes */}
             <Route path="/suppliers" element={<Suppliers />} />
             <Route path="/suppliers/:id" element={<SupplierDetails />} />
+            <Route path="/suppliers/:id/payment" element={<SupplierPayment />} />
             
             <Route path="/purchases" element={<PurchasesList />} />
             <Route path="/purchases/new" element={<NewPurchaseInvoice />} />
@@ -98,3 +104,5 @@ export function App() {
 }
 
 export default App;
+
+```
