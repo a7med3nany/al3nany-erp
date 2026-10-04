@@ -1,184 +1,377 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { 
-  ArrowRight, Search, Save, AlertCircle, 
-  Receipt, CreditCard, Box, RotateCcw
+import {
+  ArrowRight,
+  Search,
+  Save,
+  AlertCircle,
+  CreditCard,
+  Box,
+  RotateCcw,
+  Building2,
+  Warehouse as WarehouseIcon,
 } from 'lucide-react';
 import { usePurchaseStore } from '../store/purchaseStore';
 import { useSupplierStore } from '../store/supplierStore';
 import { useProductStore } from '../store/productStore';
+import { useWarehouseStore } from '../store/warehouseStore';
 import { useCashboxStore } from '../store/cashboxStore';
 import { auth } from '../config/firebase';
+
+interface ReturnItemState {
+  quantity: number;
+  returnPrice: number;
+}
 
 const PurchaseReturn: React.FC = () => {
   const navigate = useNavigate();
 
-  // Stores
-  const { purchaseInvoices, addPurchaseReturn, isLoading: isSaving, loadPurchaseInvoices } = usePurchaseStore();
+  const { purchaseInvoices, addPurchaseReturn, isLoading: isSaving } =
+    usePurchaseStore();
+
   const { suppliers, loadSuppliers } = useSupplierStore();
+
   const { products, fetchProducts } = useProductStore();
+
+  const { warehouses, fetchWarehouses } = useWarehouseStore();
+
   const { cashboxes, fetchCashboxes } = useCashboxStore();
 
-  // Form State
-  const [selectedInvoiceId, setSelectedInvoiceId] = useState<string>('');
-  const [returnItems, setReturnItems] = useState<Record<string, number>>({});
-  const [refundedAmount, setRefundedAmount] = useState<number | ''>(0);
-  const [cashboxId, setCashboxId] = useState<string>('');
-  const [returnSessionId, setReturnSessionId] = useState<string>('');
-  
-  // UI State
-  const [invoiceSearch, setInvoiceSearch] = useState('');
+  const [supplierId, setSupplierId] = useState('');
+  const [warehouseId, setWarehouseId] = useState('');
+
+  const [supplierSearch, setSupplierSearch] = useState('');
+  const [productSearch, setProductSearch] = useState('');
+
+  const [returnItems, setReturnItems] = useState<
+    Record<string, ReturnItemState>
+  >({});
+
+  const [refundMethod, setRefundMethod] = useState<
+    'cash' | 'supplier_credit'
+  >('supplier_credit');
+
+  const [cashboxId, setCashboxId] = useState('');
+
+  const [returnSessionId, setReturnSessionId] = useState<string>(() =>
+    crypto.randomUUID()
+  );
+
   const [formError, setFormError] = useState('');
   const [isSuccess, setIsSuccess] = useState(false);
 
-  // Initial Data Load
   useEffect(() => {
-    loadPurchaseInvoices();
     loadSuppliers();
     fetchProducts();
+    fetchWarehouses();
     fetchCashboxes();
-  }, [loadPurchaseInvoices, loadSuppliers, fetchProducts, fetchCashboxes]);
+  }, [loadSuppliers, fetchProducts, fetchWarehouses, fetchCashboxes]);
 
-  // Derived Data
-  const eligibleInvoices = useMemo(() => {
-    return purchaseInvoices.filter(inv => 
-      inv.status !== 'cancelled' && inv.status !== 'fully_returned'
+  const supplierPurchaseData = useMemo(() => {
+    if (!supplierId) {
+      return [];
+    }
+
+    return purchaseInvoices.filter(
+      (invoice) =>
+        invoice.supplierId === supplierId &&
+        invoice.status !== 'cancelled'
     );
-  }, [purchaseInvoices]);
+  }, [purchaseInvoices, supplierId]);
 
-  const searchResults = useMemo(() => {
-    if (!invoiceSearch.trim()) return eligibleInvoices;
-    const query = invoiceSearch.toLowerCase();
-    return eligibleInvoices.filter(inv => {
-      const supplier = suppliers.find(s => s.id === inv.supplierId);
-      return inv.invoiceNumber.toLowerCase().includes(query) || 
-             (supplier && supplier.name.toLowerCase().includes(query));
-    }).slice(0, 10);
-  }, [eligibleInvoices, invoiceSearch, suppliers]);
+  const supplierProductIds = useMemo(() => {
+    const ids = new Set<string>();
 
-  const selectedInvoice = useMemo(() => {
-    return purchaseInvoices.find(inv => inv.id === selectedInvoiceId) || null;
-  }, [purchaseInvoices, selectedInvoiceId]);
-
-  // Calculations
-  const totalReturnAmount = useMemo(() => {
-    if (!selectedInvoice) return 0;
-    let total = 0;
-    selectedInvoice.items.forEach(item => {
-      const returnQty = returnItems[item.lineId] || 0;
-      total += returnQty * item.netUnitCost;
+    supplierPurchaseData.forEach((invoice) => {
+      invoice.items.forEach((item) => {
+        ids.add(item.productId);
+      });
     });
+
+    return ids;
+  }, [supplierPurchaseData]);
+
+  const supplierProducts = useMemo(() => {
+    const activeProducts = products.filter(
+      (product) =>
+        product.isActive &&
+        !product.isDeleted &&
+        supplierProductIds.has(product.id)
+    );
+
+    if (!productSearch.trim()) {
+      return activeProducts;
+    }
+
+    const query = productSearch.trim().toLowerCase();
+
+    return activeProducts.filter((product) => {
+      const name = product.name.toLowerCase();
+      const sku = product.sku?.toLowerCase() || '';
+      const barcode = product.barcode?.toLowerCase() || '';
+
+      return (
+        name.includes(query) ||
+        sku.includes(query) ||
+        barcode.includes(query)
+      );
+    });
+  }, [products, supplierProductIds, productSearch]);
+
+  const selectedSupplier = useMemo(() => {
+    return suppliers.find((supplier) => supplier.id === supplierId) || null;
+  }, [suppliers, supplierId]);
+
+  const selectedWarehouse = useMemo(() => {
+    return warehouses.find((warehouse) => warehouse.id === warehouseId) || null;
+  }, [warehouses, warehouseId]);
+
+  const filteredSuppliers = useMemo(() => {
+    if (!supplierSearch.trim()) {
+      return suppliers.filter((supplier) => supplier.isActive);
+    }
+
+    const query = supplierSearch.trim().toLowerCase();
+
+    return suppliers
+      .filter((supplier) => supplier.isActive)
+      .filter((supplier) => {
+        const name = supplier.name.toLowerCase();
+        const phone = supplier.phone?.toLowerCase() || '';
+
+        return name.includes(query) || phone.includes(query);
+      })
+      .slice(0, 10);
+  }, [suppliers, supplierSearch]);
+
+  const selectedItems = useMemo(() => {
+    return Object.entries(returnItems).filter(
+      ([, item]) => item.quantity > 0
+    );
+  }, [returnItems]);
+
+  const totalReturnAmount = useMemo(() => {
+    const total = selectedItems.reduce((sum, [, item]) => {
+      return sum + item.quantity * item.returnPrice;
+    }, 0);
+
     return Number(total.toFixed(4));
-  }, [selectedInvoice, returnItems]);
+  }, [selectedItems]);
 
-  const numRefundedAmount = Number(refundedAmount) || 0;
-  const supplierCreditAmount = Number((totalReturnAmount - numRefundedAmount).toFixed(4));
-
-  // Handlers
-  const handleInvoiceSelect = (invoiceId: string) => {
-    setSelectedInvoiceId(invoiceId);
+  const handleSupplierSelect = (id: string) => {
+    setSupplierId(id);
+    setWarehouseId('');
     setReturnItems({});
-    setRefundedAmount(0);
     setCashboxId('');
+    setRefundMethod('supplier_credit');
+    setSupplierSearch('');
+    setProductSearch('');
     setFormError('');
-    setInvoiceSearch('');
-    // توليد معرف جلسة فريد وثابت لضمان عدم تغير ID المرتجع عند إعادة المحاولة (Idempotency)
-    setReturnSessionId(Date.now().toString(36)); 
+    setReturnSessionId(crypto.randomUUID());
   };
 
-  const handleReturnQtyChange = (lineId: string, value: string, availableQty: number) => {
-    if (value === '') {
-      const newItems = { ...returnItems };
-      delete newItems[lineId];
-      setReturnItems(newItems);
+  const handleWarehouseChange = (id: string) => {
+    setWarehouseId(id);
+    setReturnItems({});
+    setCashboxId('');
+    setRefundMethod('supplier_credit');
+    setFormError('');
+    setReturnSessionId(crypto.randomUUID());
+  };
+
+  const handleProductAdd = (productId: string) => {
+    if (!warehouseId) {
+      setFormError('يجب اختيار المخزن أولاً.');
       return;
     }
 
-    const qty = parseFloat(value);
-    if (isNaN(qty) || qty < 0) return;
-    
-    const safeQty = qty > availableQty ? availableQty : qty;
-    
-    setReturnItems(prev => ({
+    const product = products.find((item) => item.id === productId);
+
+    if (!product) {
+      setFormError('المنتج المحدد غير موجود.');
+      return;
+    }
+
+    setReturnItems((prev) => ({
       ...prev,
-      [lineId]: safeQty
+      [productId]: prev[productId] || {
+        quantity: 1,
+        returnPrice: product.averageCost ?? product.lastPurchaseCost ?? 0,
+      },
+    }));
+
+    setProductSearch('');
+    setFormError('');
+  };
+
+  const handleQuantityChange = (productId: string, value: string) => {
+    if (value === '') {
+      setReturnItems((prev) => ({
+        ...prev,
+        [productId]: {
+          ...prev[productId],
+          quantity: 0,
+        },
+      }));
+      return;
+    }
+
+    const quantity = Number(value);
+
+    if (!Number.isFinite(quantity) || quantity < 0) {
+      return;
+    }
+
+    setReturnItems((prev) => ({
+      ...prev,
+      [productId]: {
+        ...prev[productId],
+        quantity,
+      },
     }));
   };
 
-  const getProductName = (productId: string) => {
-    const product = products.find(p => p.id === productId);
-    return product ? product.name : 'منتج غير معروف';
+  const handleReturnPriceChange = (productId: string, value: string) => {
+    if (value === '') {
+      setReturnItems((prev) => ({
+        ...prev,
+        [productId]: {
+          ...prev[productId],
+          returnPrice: 0,
+        },
+      }));
+      return;
+    }
+
+    const returnPrice = Number(value);
+
+    if (!Number.isFinite(returnPrice) || returnPrice < 0) {
+      return;
+    }
+
+    setReturnItems((prev) => ({
+      ...prev,
+      [productId]: {
+        ...prev[productId],
+        returnPrice,
+      },
+    }));
   };
 
-  const getSupplierName = (supplierId: string) => {
-    const supplier = suppliers.find(s => s.id === supplierId);
-    return supplier ? supplier.name : 'مورد غير معروف';
+  const removeProduct = (productId: string) => {
+    setReturnItems((prev) => {
+      const next = { ...prev };
+      delete next[productId];
+      return next;
+    });
   };
 
   const validateForm = (): boolean => {
     setFormError('');
-    
-    if (!selectedInvoice) {
-      return setFormError('يجب اختيار فاتورة المشتريات الأصلية.'), false;
+
+    if (!supplierId) {
+      setFormError('يجب اختيار المورد.');
+      return false;
     }
 
-    const hasItemsToReturn = Object.values(returnItems).some(qty => qty > 0);
-    if (!hasItemsToReturn) {
-      return setFormError('يجب تحديد كمية مرتجعة لصنف واحد على الأقل.'), false;
+    if (!selectedSupplier) {
+      setFormError('المورد المحدد غير موجود.');
+      return false;
     }
 
-    if (numRefundedAmount < 0) {
-      return setFormError('المبلغ المسترد لا يمكن أن يكون سالباً.'), false;
+    if (!warehouseId) {
+      setFormError('يجب اختيار المخزن.');
+      return false;
     }
 
-    const TOLERANCE = 0.0001;
-    if (numRefundedAmount > totalReturnAmount + TOLERANCE) {
-      return setFormError('المبلغ المسترد نقدًا لا يمكن أن يتجاوز إجمالي قيمة المرتجع.'), false;
+    if (!selectedWarehouse) {
+      setFormError('المخزن المحدد غير موجود.');
+      return false;
     }
 
-    if (numRefundedAmount > 0 && !cashboxId) {
-      return setFormError('يجب تحديد الخزينة في حال وجود استرداد نقدي.'), false;
+    if (selectedItems.length === 0) {
+      setFormError('يجب إضافة صنف واحد على الأقل إلى المرتجع.');
+      return false;
+    }
+
+    for (const [productId, item] of selectedItems) {
+      if (item.quantity <= 0) {
+        setFormError('يجب أن تكون كمية المرتجع أكبر من صفر.');
+        return false;
+      }
+
+      if (item.returnPrice < 0) {
+        setFormError('سعر المرتجع لا يمكن أن يكون سالبًا.');
+        return false;
+      }
+
+      const product = products.find((product) => product.id === productId);
+
+      if (!product) {
+        setFormError('يوجد منتج غير موجود ضمن المرتجع.');
+        return false;
+      }
+    }
+
+    if (totalReturnAmount <= 0) {
+      setFormError('إجمالي قيمة المرتجع يجب أن يكون أكبر من صفر.');
+      return false;
+    }
+
+    if (refundMethod === 'cash' && !cashboxId) {
+      setFormError('يجب اختيار الخزينة عند استرداد قيمة المرتجع نقدًا.');
+      return false;
     }
 
     if (!auth.currentUser?.uid) {
-      return setFormError('يجب تسجيل الدخول لإتمام العملية.'), false;
+      setFormError('يجب تسجيل الدخول لإتمام العملية.');
+      return false;
     }
 
     return true;
   };
 
   const handleSubmit = async () => {
-    if (!validateForm() || !selectedInvoice) return;
+    if (!validateForm()) {
+      return;
+    }
 
     try {
-      // بناء الـ ID باستخدام معرف الجلسة الثابت لضمان الـ Determinism
-      const returnId = `ret_${selectedInvoice.id.slice(-6)}_${returnSessionId}`;
-      const returnNumber = `PRET-${returnSessionId.toUpperCase()}`;
+      const returnId = `ret_${returnSessionId}`;
+      const returnNumber = `PRET-${returnSessionId
+        .replace(/-/g, '')
+        .slice(0, 10)
+        .toUpperCase()}`;
 
-      const itemsToReturn = Object.entries(returnItems)
-        .filter(([_, qty]) => qty > 0)
-        .map(([lineId, qty]) => ({
-          originalLineId: lineId,
-          quantity: qty
-        }));
+      const items = selectedItems.map(([productId, item]) => ({
+        lineId: `${returnId}_line_${productId}`,
+        productId,
+        quantity: item.quantity,
+        returnPrice: item.returnPrice,
+      }));
 
       await addPurchaseReturn({
         returnId,
         returnNumber,
-        originalInvoiceId: selectedInvoice.id,
-        items: itemsToReturn,
-        refundedAmount: numRefundedAmount,
-        cashboxId: numRefundedAmount > 0 ? cashboxId : undefined,
-        createdBy: auth.currentUser!.uid
+        supplierId,
+        warehouseId,
+        items,
+        refundMethod,
+        cashboxId: refundMethod === 'cash' ? cashboxId : undefined,
+        createdBy: auth.currentUser!.uid,
       });
 
       setIsSuccess(true);
+
       setTimeout(() => {
         navigate('/purchases');
       }, 2000);
-
-    } catch (err) {
-      setFormError(err instanceof Error ? err.message : 'حدث خطأ أثناء حفظ المرتجع.');
+    } catch (error) {
+      setFormError(
+        error instanceof Error
+          ? error.message
+          : 'حدث خطأ أثناء حفظ المرتجع.'
+      );
     }
   };
 
@@ -189,8 +382,12 @@ const PurchaseReturn: React.FC = () => {
           <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center">
             <Save className="w-8 h-8 text-green-600" />
           </div>
+
           <h2 className="text-2xl font-bold">تم حفظ المرتجع بنجاح</h2>
-          <p>تم تسجيل المرتجع وتحديث المخزون وحساب المورد بنجاح.</p>
+
+          <p>
+            تم تسجيل المرتجع وتحديث المخزون وحساب المورد بنجاح.
+          </p>
         </div>
       </div>
     );
@@ -198,21 +395,24 @@ const PurchaseReturn: React.FC = () => {
 
   return (
     <div className="container mx-auto p-4 md:p-6 space-y-6 dir-rtl pb-24">
-      {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <button 
+          <button
             onClick={() => navigate(-1)}
             className="p-2 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
           >
             <ArrowRight className="w-5 h-5 text-gray-600" />
           </button>
+
           <div>
             <h1 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
               <RotateCcw className="w-6 h-6 text-orange-600" />
               إنشاء مرتجع مشتريات
             </h1>
-            <p className="text-sm text-gray-500">إرجاع بضاعة للمورد وتسوية الحسابات الخاصة بها.</p>
+
+            <p className="text-sm text-gray-500">
+              إرجاع بضاعة للمورد وتسوية الحسابات الخاصة بها.
+            </p>
           </div>
         </div>
       </div>
@@ -225,205 +425,428 @@ const PurchaseReturn: React.FC = () => {
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        
-        {/* Main Area: Invoice Selection & Items */}
         <div className="lg:col-span-2 space-y-6">
-          
-          {/* Section 1: Invoice Selection */}
-          <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 space-y-4">
+          <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 space-y-5">
             <h2 className="text-lg font-semibold text-gray-800 flex items-center gap-2 border-b pb-3">
-              <Receipt className="w-5 h-5 text-blue-600" /> اختيار الفاتورة الأصلية
+              <Building2 className="w-5 h-5 text-blue-600" />
+              بيانات المرتجع
             </h2>
-            
-            <div className="relative">
-              <Search className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5" />
-              <input
-                type="text"
-                placeholder="ابحث برقم الفاتورة أو اسم المورد..."
-                value={invoiceSearch}
-                onChange={(e) => setInvoiceSearch(e.target.value)}
-                className="w-full pr-10 pl-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all"
-              />
-              
-              {/* Dropdown Results */}
-              {invoiceSearch && !selectedInvoice && (
-                <div className="absolute z-10 w-full mt-2 bg-white border border-gray-200 rounded-xl shadow-lg overflow-hidden max-h-60 overflow-y-auto">
-                  {searchResults.length > 0 ? (
-                    searchResults.map(inv => (
-                      <button
-                        key={inv.id}
-                        onClick={() => handleInvoiceSelect(inv.id)}
-                        className="w-full text-right px-4 py-3 hover:bg-blue-50 flex flex-col border-b border-gray-100 last:border-0"
-                      >
-                        <span className="font-semibold text-gray-800">فاتورة رقم: {inv.invoiceNumber}</span>
-                        <span className="text-sm text-gray-500">المورد: {getSupplierName(inv.supplierId)}</span>
-                      </button>
-                    ))
-                  ) : (
-                    <div className="px-4 py-4 text-center text-gray-500 text-sm">لا توجد فواتير قابلة للإرجاع مطابقة للبحث.</div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-gray-700">
+                المورد
+              </label>
+
+              {selectedSupplier ? (
+                <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 flex items-center justify-between">
+                  <div>
+                    <p className="text-xs text-gray-500 mb-1">
+                      المورد المحدد
+                    </p>
+                    <p className="font-bold text-gray-900">
+                      {selectedSupplier.name}
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSupplierId('');
+                      setWarehouseId('');
+                      setReturnItems({});
+                      setCashboxId('');
+                      setSupplierSearch('');
+                      setProductSearch('');
+                      setFormError('');
+                      setReturnSessionId(crypto.randomUUID());
+                    }}
+                    className="text-blue-600 hover:text-blue-800 text-sm font-medium underline"
+                  >
+                    تغيير المورد
+                  </button>
+                </div>
+              ) : (
+                <div className="relative">
+                  <Search className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5" />
+
+                  <input
+                    type="text"
+                    value={supplierSearch}
+                    onChange={(e) => setSupplierSearch(e.target.value)}
+                    placeholder="ابحث باسم المورد أو رقم الهاتف..."
+                    className="w-full pr-10 pl-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white"
+                  />
+
+                  {supplierSearch && (
+                    <div className="absolute z-20 w-full mt-2 bg-white border border-gray-200 rounded-xl shadow-lg overflow-hidden max-h-60 overflow-y-auto">
+                      {filteredSuppliers.length > 0 ? (
+                        filteredSuppliers.map((supplier) => (
+                          <button
+                            key={supplier.id}
+                            type="button"
+                            onClick={() => handleSupplierSelect(supplier.id)}
+                            className="w-full text-right px-4 py-3 hover:bg-blue-50 border-b border-gray-100 last:border-0"
+                          >
+                            <span className="font-semibold text-gray-800 block">
+                              {supplier.name}
+                            </span>
+
+                            {supplier.phone && (
+                              <span className="text-sm text-gray-500">
+                                {supplier.phone}
+                              </span>
+                            )}
+                          </button>
+                        ))
+                      ) : (
+                        <div className="px-4 py-4 text-center text-gray-500 text-sm">
+                          لا يوجد مورد مطابق للبحث.
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
               )}
             </div>
 
-            {/* Selected Invoice Details */}
-            {selectedInvoice && (
-              <div className="bg-blue-50/50 p-4 rounded-xl border border-blue-100 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-                <div>
-                  <p className="text-sm text-gray-500 mb-1">الفاتورة المحددة</p>
-                  <p className="font-bold text-gray-900 text-lg">{selectedInvoice.invoiceNumber}</p>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-500 mb-1">المورد</p>
-                  <p className="font-semibold text-gray-800">{getSupplierName(selectedInvoice.supplierId)}</p>
-                </div>
-                <button 
-                  onClick={() => setSelectedInvoiceId('')}
-                  className="text-blue-600 hover:text-blue-800 text-sm font-medium underline"
-                >
-                  تغيير الفاتورة
-                </button>
-              </div>
-            )}
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                <WarehouseIcon className="w-4 h-4 text-blue-600" />
+                المخزن
+              </label>
+
+              <select
+                value={warehouseId}
+                onChange={(e) => handleWarehouseChange(e.target.value)}
+                disabled={!supplierId}
+                className="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+              >
+                <option value="">اختر المخزن...</option>
+
+                {warehouses
+                  .filter((warehouse) => warehouse.isActive)
+                  .map((warehouse) => (
+                    <option key={warehouse.id} value={warehouse.id}>
+                      {warehouse.name}
+                    </option>
+                  ))}
+              </select>
+            </div>
           </div>
 
-          {/* Section 2: Items for Return */}
-          {selectedInvoice && (
-            <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 space-y-4">
+          {supplierId && warehouseId && (
+            <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 space-y-5">
               <h2 className="text-lg font-semibold text-gray-800 flex items-center gap-2 border-b pb-3">
-                <Box className="w-5 h-5 text-blue-600" /> الأصناف والكميات
+                <Box className="w-5 h-5 text-blue-600" />
+                إضافة الأصناف المرتجعة
               </h2>
 
-              <div className="overflow-x-auto rounded-xl border border-gray-200">
-                <table className="w-full text-right text-sm">
-                  <thead className="bg-gray-50 text-gray-600 border-b border-gray-200">
-                    <tr>
-                      <th className="px-4 py-3 font-semibold">الصنف</th>
-                      <th className="px-4 py-3 font-semibold text-center">الكمية المشتراة</th>
-                      <th className="px-4 py-3 font-semibold text-center text-orange-600">مرتجع سابق</th>
-                      <th className="px-4 py-3 font-semibold text-center text-green-600">المتاح للإرجاع</th>
-                      <th className="px-4 py-3 font-semibold text-center">صافي التكلفة/وحدة</th>
-                      <th className="px-4 py-3 font-semibold text-center bg-blue-50 text-blue-800 w-32">كمية المرتجع الحالي</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-100">
-                    {selectedInvoice.items.map((rawItem) => {
-                      // TypeScript-safe approach for returnedQuantity without altering the global type
-                      const item = rawItem as typeof rawItem & { returnedQuantity?: number };
-                      const previouslyReturned = item.returnedQuantity || 0;
-                      const availableQty = item.quantity - previouslyReturned;
-                      const currentReturnQty = returnItems[item.lineId] ?? '';
+              <div className="relative">
+                <Search className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5" />
 
-                      return (
-                        <tr key={item.lineId} className={`transition-colors ${availableQty === 0 ? 'bg-gray-50/50 opacity-60' : 'hover:bg-gray-50'}`}>
-                          <td className="px-4 py-3 font-medium text-gray-800">
-                            {getProductName(item.productId)}
-                          </td>
-                          <td className="px-4 py-3 text-center text-gray-600 font-medium">
-                            {item.quantity}
-                          </td>
-                          <td className="px-4 py-3 text-center text-orange-600 font-medium">
-                            {previouslyReturned}
-                          </td>
-                          <td className="px-4 py-3 text-center text-green-600 font-bold">
-                            {availableQty}
-                          </td>
-                          <td className="px-4 py-3 text-center text-gray-600 font-medium">
-                            {item.netUnitCost.toLocaleString()} ج.م
-                          </td>
-                          <td className="px-4 py-3 text-center bg-blue-50/30">
-                            <input
-                              type="number"
-                              min="0"
-                              max={availableQty}
-                              step="any"
-                              disabled={availableQty === 0}
-                              value={currentReturnQty}
-                              onChange={(e) => handleReturnQtyChange(item.lineId, e.target.value, availableQty)}
-                              className="w-full px-2 py-1.5 border border-blue-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 text-center font-bold text-blue-800 disabled:bg-gray-100 disabled:border-gray-200"
-                              placeholder="0"
-                            />
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                <input
+                  type="text"
+                  value={productSearch}
+                  onChange={(e) => setProductSearch(e.target.value)}
+                  placeholder="ابحث عن صنف تم شراؤه من هذا المورد..."
+                  className="w-full pr-10 pl-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white"
+                />
+
+                {productSearch && (
+                  <div className="absolute z-20 w-full mt-2 bg-white border border-gray-200 rounded-xl shadow-lg overflow-hidden max-h-60 overflow-y-auto">
+                    {supplierProducts.length > 0 ? (
+                      supplierProducts.slice(0, 10).map((product) => {
+                        const alreadyAdded = !!returnItems[product.id];
+
+                        return (
+                          <button
+                            key={product.id}
+                            type="button"
+                            disabled={alreadyAdded}
+                            onClick={() => handleProductAdd(product.id)}
+                            className="w-full text-right px-4 py-3 hover:bg-blue-50 disabled:bg-gray-50 disabled:text-gray-400 border-b border-gray-100 last:border-0"
+                          >
+                            <span className="font-semibold block">
+                              {product.name}
+                            </span>
+
+                            <span className="text-xs text-gray-500">
+                              {product.sku || product.barcode || 'بدون كود'}
+                            </span>
+
+                            {alreadyAdded && (
+                              <span className="text-xs text-orange-600 block mt-1">
+                                مضاف بالفعل
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })
+                    ) : (
+                      <div className="px-4 py-4 text-center text-gray-500 text-sm">
+                        لا توجد أصناف مطابقة لهذا المورد.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {selectedItems.length === 0 ? (
+                <div className="text-center py-12 text-gray-400 border border-dashed border-gray-300 rounded-xl">
+                  <Box className="w-12 h-12 mx-auto mb-3 opacity-50" />
+                  <p className="text-sm">
+                    ابحث عن صنف وأضفه إلى المرتجع.
+                  </p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto rounded-xl border border-gray-200">
+                  <table className="w-full text-right text-sm">
+                    <thead className="bg-gray-50 text-gray-600 border-b border-gray-200">
+                      <tr>
+                        <th className="px-4 py-3 font-semibold">
+                          الصنف
+                        </th>
+
+                        <th className="px-4 py-3 font-semibold text-center">
+                          الكمية
+                        </th>
+
+                        <th className="px-4 py-3 font-semibold text-center">
+                          سعر المرتجع
+                        </th>
+
+                        <th className="px-4 py-3 font-semibold text-center">
+                          الإجمالي
+                        </th>
+
+                        <th className="px-4 py-3 w-16"></th>
+                      </tr>
+                    </thead>
+
+                    <tbody className="divide-y divide-gray-100">
+                      {selectedItems.map(([productId, item]) => {
+                        const product = products.find(
+                          (currentProduct) =>
+                            currentProduct.id === productId
+                        );
+
+                        if (!product) {
+                          return null;
+                        }
+
+                        const lineTotal = Number(
+                          (item.quantity * item.returnPrice).toFixed(4)
+                        );
+
+                        return (
+                          <tr key={productId} className="hover:bg-gray-50">
+                            <td className="px-4 py-4">
+                              <div className="font-semibold text-gray-800">
+                                {product.name}
+                              </div>
+
+                              <div className="text-xs text-gray-500 mt-1">
+                                {product.sku ||
+                                  product.barcode ||
+                                  'بدون كود'}
+                              </div>
+                            </td>
+
+                            <td className="px-4 py-4">
+                              <input
+                                type="number"
+                                min="0"
+                                step="any"
+                                value={item.quantity}
+                                onChange={(e) =>
+                                  handleQuantityChange(
+                                    productId,
+                                    e.target.value
+                                  )
+                                }
+                                className="w-28 mx-auto block px-2 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-center font-bold"
+                              />
+                            </td>
+
+                            <td className="px-4 py-4">
+                              <input
+                                type="number"
+                                min="0"
+                                step="any"
+                                value={item.returnPrice}
+                                onChange={(e) =>
+                                  handleReturnPriceChange(
+                                    productId,
+                                    e.target.value
+                                  )
+                                }
+                                className="w-32 mx-auto block px-2 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-center font-bold text-orange-700"
+                              />
+                            </td>
+
+                            <td className="px-4 py-4 text-center font-bold text-gray-800">
+                              {lineTotal.toLocaleString()} ج.م
+                            </td>
+
+                            <td className="px-4 py-4 text-center">
+                              <button
+                                type="button"
+                                onClick={() => removeProduct(productId)}
+                                className="text-red-500 hover:text-red-700 text-sm font-medium"
+                              >
+                                حذف
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              <div className="bg-blue-50 border border-blue-100 rounded-xl p-3 text-sm text-blue-800">
+                سيتم التحقق عند الحفظ من أن الصنف تم شراؤه فعليًا من المورد
+                المحدد، وأن الكمية المطلوب إرجاعها متاحة في المخزن.
               </div>
             </div>
           )}
-
         </div>
 
-        {/* Sidebar: Financials & Payment Settlement */}
         <div className="space-y-6">
-          
           <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 space-y-5">
             <h2 className="text-lg font-semibold text-gray-800 border-b pb-3 flex items-center gap-2">
-              <CreditCard className="w-5 h-5 text-blue-600" /> التسوية المالية
+              <CreditCard className="w-5 h-5 text-blue-600" />
+              التسوية المالية
             </h2>
-            
-            {!selectedInvoice ? (
+
+            {!supplierId || !warehouseId ? (
               <div className="text-center py-10 text-gray-400">
-                <Receipt className="w-12 h-12 mx-auto mb-2 opacity-50" />
-                <p className="text-sm">الرجاء اختيار الفاتورة أولاً لعرض التسوية.</p>
+                <CreditCard className="w-12 h-12 mx-auto mb-2 opacity-50" />
+                <p className="text-sm">
+                  اختر المورد والمخزن أولاً.
+                </p>
               </div>
             ) : (
-              <div className="space-y-4">
-                
+              <div className="space-y-5">
                 <div className="bg-gray-50 p-4 rounded-xl border border-gray-200 text-center">
-                  <span className="text-sm text-gray-500 block mb-1">إجمالي قيمة المرتجع</span>
-                  <span className="text-2xl font-black text-gray-900">{totalReturnAmount.toLocaleString()} ج.م</span>
-                  <p className="text-xs text-gray-400 mt-1">يتم التقييم باستخدام صافي التكلفة التاريخية</p>
+                  <span className="text-sm text-gray-500 block mb-1">
+                    إجمالي قيمة المرتجع
+                  </span>
+
+                  <span className="text-2xl font-black text-gray-900">
+                    {totalReturnAmount.toLocaleString()} ج.م
+                  </span>
+
+                  <p className="text-xs text-gray-400 mt-1">
+                    سعر التسوية يحدده المستخدم لكل صنف.
+                  </p>
                 </div>
 
-                <div className="space-y-2 pt-2 border-t border-gray-100">
-                  <label className="text-sm font-medium text-gray-700">المبلغ المسترد نقدًا (إن وجد)</label>
-                  <input
-                    type="number"
-                    min="0"
-                    max={totalReturnAmount}
-                    step="any"
-                    value={refundedAmount}
-                    onChange={(e) => setRefundedAmount(e.target.value === '' ? '' : parseFloat(e.target.value))}
-                    className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-lg font-bold text-green-700"
-                    placeholder="0"
-                  />
+                <div className="space-y-3">
+                  <label className="text-sm font-medium text-gray-700">
+                    طريقة التسوية
+                  </label>
+
+                  <div className="grid grid-cols-1 gap-2">
+                    <label className="flex items-center gap-3 border border-gray-200 rounded-xl p-3 cursor-pointer hover:bg-gray-50">
+                      <input
+                        type="radio"
+                        name="refundMethod"
+                        value="supplier_credit"
+                        checked={refundMethod === 'supplier_credit'}
+                        onChange={() => {
+                          setRefundMethod('supplier_credit');
+                          setCashboxId('');
+                        }}
+                        className="w-4 h-4"
+                      />
+
+                      <div>
+                        <p className="font-semibold text-gray-800">
+                          رصيد دائن لدى المورد
+                        </p>
+
+                        <p className="text-xs text-gray-500">
+                          يتم تخفيض مديونية المورد أو إنشاء رصيد دائن لنا.
+                        </p>
+                      </div>
+                    </label>
+
+                    <label className="flex items-center gap-3 border border-gray-200 rounded-xl p-3 cursor-pointer hover:bg-gray-50">
+                      <input
+                        type="radio"
+                        name="refundMethod"
+                        value="cash"
+                        checked={refundMethod === 'cash'}
+                        onChange={() => setRefundMethod('cash')}
+                        className="w-4 h-4"
+                      />
+
+                      <div>
+                        <p className="font-semibold text-gray-800">
+                          استرداد نقدي كامل
+                        </p>
+
+                        <p className="text-xs text-gray-500">
+                          المورد يعيد قيمة المرتجع نقدًا إلى الخزينة.
+                        </p>
+                      </div>
+                    </label>
+                  </div>
                 </div>
 
-                {numRefundedAmount > 0 && (
-                  <div className="space-y-2 animate-in fade-in slide-in-from-top-2">
-                    <label className="text-sm font-medium text-gray-700">إيداع في الخزينة <span className="text-red-500">*</span></label>
+                {refundMethod === 'cash' && (
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-gray-700">
+                      الخزينة المستلمة للمبلغ{' '}
+                      <span className="text-red-500">*</span>
+                    </label>
+
                     <select
                       value={cashboxId}
                       onChange={(e) => setCashboxId(e.target.value)}
-                      className="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 appearance-none"
+                      className="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                     >
-                      <option value="">اختر الخزنة...</option>
-                      {cashboxes?.filter(c => c.isActive).map(cashbox => (
-                        <option key={cashbox.id} value={cashbox.id}>
-                          {cashbox.name} ({cashbox.balance.toLocaleString()})
-                        </option>
-                      ))}
+                      <option value="">اختر الخزينة...</option>
+
+                      {cashboxes
+                        ?.filter((cashbox) => cashbox.isActive)
+                        .map((cashbox) => (
+                          <option key={cashbox.id} value={cashbox.id}>
+                            {cashbox.name} (
+                            {cashbox.balance.toLocaleString()} ج.م)
+                          </option>
+                        ))}
                     </select>
+
+                    <p className="text-xs text-gray-500">
+                      سيتم تسجيل المبلغ كحركة دخول إلى الخزينة.
+                    </p>
                   </div>
                 )}
 
-                <div className="bg-orange-50 p-3 rounded-xl border border-orange-100 flex justify-between items-center mt-4">
-                  <span className="text-sm font-medium text-orange-800">تخفيض مديونية المورد (رصيد دائن):</span>
-                  <span className="font-bold text-orange-700 text-lg">
-                    {supplierCreditAmount.toLocaleString()} ج.م
-                  </span>
-                </div>
+                <div className="bg-orange-50 p-4 rounded-xl border border-orange-100">
+                  <div className="flex justify-between items-center">
+                    <span className="text-sm font-medium text-orange-800">
+                      قيمة التسوية
+                    </span>
 
+                    <span className="font-bold text-orange-700 text-lg">
+                      {totalReturnAmount.toLocaleString()} ج.م
+                    </span>
+                  </div>
+
+                  <p className="text-xs text-orange-700 mt-2">
+                    سيتم تسجيل حركة مورد من نوع خروج بقيمة المرتجع.
+                  </p>
+                </div>
               </div>
             )}
           </div>
-
         </div>
       </div>
 
-      {/* Floating Action Bar */}
       <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 p-4 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)] z-40">
         <div className="container mx-auto flex justify-end gap-4 px-4 md:px-6">
           <button
@@ -433,22 +856,29 @@ const PurchaseReturn: React.FC = () => {
           >
             إلغاء
           </button>
+
           <button
             onClick={handleSubmit}
-            disabled={isSaving || !selectedInvoice || Object.values(returnItems).every(qty => qty === 0)}
+            disabled={
+              isSaving ||
+              !supplierId ||
+              !warehouseId ||
+              selectedItems.length === 0 ||
+              totalReturnAmount <= 0
+            }
             className="px-8 py-2.5 bg-orange-600 hover:bg-orange-700 text-white rounded-xl font-medium transition-colors disabled:opacity-50 flex items-center gap-2 min-w-[200px] justify-center"
           >
             {isSaving ? (
               <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
             ) : (
               <>
-                <RotateCcw className="w-5 h-5" /> تأكيد المرتجع
+                <RotateCcw className="w-5 h-5" />
+                تأكيد المرتجع
               </>
             )}
           </button>
         </div>
       </div>
-
     </div>
   );
 };
