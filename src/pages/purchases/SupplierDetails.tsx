@@ -1,9 +1,13 @@
+**ملخص التعديلات:**
+تمت إضافة زر "تسجيل دفعة" في شريط الإجراءات أعلى صفحة تفاصيل المورد (بجانب أزرار تعديل وتفعيل/تعطيل المورد). الزر يقوم بالتوجيه حصرياً إلى مسار suppliers/:id/payment باستخدام useNavigate، دون إضافة أي منطق مالي أو تعديل أي ملفات أخرى للحفاظ على فصل المهام (Separation of Concerns).
+إليك الملف الكامل والنهائي **src/pages/purchases/SupplierDetails.tsx**:
+```typescript
 import React, { useEffect, useState, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { 
   ArrowRight, Edit, Power, AlertCircle, X, 
   CheckCircle2, Phone, MapPin, FileText, 
-  TrendingUp, TrendingDown
+  TrendingUp, TrendingDown, Banknote
 } from 'lucide-react';
 import { useSupplierStore } from '../../store/supplierStore';
 import { Supplier, SupplierTransaction } from '../../types';
@@ -211,7 +215,15 @@ const SupplierDetails: React.FC = () => {
         </button>
 
         <div className="flex flex-col items-end gap-1 w-full sm:w-auto">
-          <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+          <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto justify-end">
+            <button
+              onClick={() => navigate(`/suppliers/${id}/payment`)}
+              className="flex items-center gap-1.5 bg-blue-600 text-white hover:bg-blue-700 px-3.5 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
+            >
+              <Banknote className="w-4 h-4" />
+              تسجيل دفعة
+            </button>
+            
             <button
               onClick={handleOpenEditModal}
               className="flex items-center gap-1.5 bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 px-3.5 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
@@ -504,3 +516,5 @@ const SupplierDetails: React.FC = () => {
 };
 
 export default SupplierDetails;
+
+```
