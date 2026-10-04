@@ -512,5 +512,3 @@ const SupplierDetails: React.FC = () => {
 };
 
 export default SupplierDetails;
-
-```
