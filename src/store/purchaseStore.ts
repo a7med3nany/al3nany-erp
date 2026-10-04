@@ -250,13 +250,3 @@ export const usePurchaseStore = create<PurchaseState>((set) => ({
     });
   }
 }));
-
-ما تم تغييره فقط
-
-- أزلت استخدام "get()" والـ nested actions داخل "addPurchaseInvoice" و"addPurchaseReturn" حتى لا تتداخل حالات "isLoading".
-- أزلت الاعتماد على "params.originalInvoiceId" من "addPurchaseReturn"؛ المرتجع عندنا مستقل عن اختيار فاتورة أصلية.
-- بعد إنشاء المرتجع يتم تحديث قائمة المرتجعات + قائمة الفواتير مباشرة.
-
-لم نغير أي API أو Model أو Service.
-
-الملف التالي بعد اعتماد هذا: "NewPurchaseInvoice.tsx".
