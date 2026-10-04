@@ -1,7 +1,4 @@
-**ملخص التعديل:**
-تم إضافة مسار Route جديد لصفحة "تسجيل دفعة المورد" (SupplierPayment) لتكون ضمن مجموعة المسارات المحمية ProtectedRoute وداخل الـ MainLayout، بحيث يمكن الوصول إليها عبر المسار /suppliers/:id/payment كما هو مطلوب.
-إليك الملف الكامل والنهائي **src/App.tsx**:
-```typescript
+
 import React, { useEffect } from 'react';
 import { HashRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { onAuthStateChanged } from 'firebase/auth';
