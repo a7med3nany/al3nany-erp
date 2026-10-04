@@ -1,9 +1,9 @@
 import { create } from 'zustand';
 import { PurchaseInvoice, PurchaseReturn } from '../types';
-import { 
-  getPurchaseInvoices, 
-  getPurchaseInvoiceById, 
-  createPurchaseInvoice, 
+import {
+  getPurchaseInvoices,
+  getPurchaseInvoiceById,
+  createPurchaseInvoice,
   CreatePurchaseInvoiceParams,
   getPurchaseReturns,
   getPurchaseReturnById,
@@ -15,11 +15,11 @@ interface PurchaseState {
   // Data - Invoices
   purchaseInvoices: PurchaseInvoice[];
   currentPurchaseInvoice: PurchaseInvoice | null;
-  
+
   // Data - Returns
   purchaseReturns: PurchaseReturn[];
   currentPurchaseReturn: PurchaseReturn | null;
-  
+
   // Status
   isLoading: boolean;
   error: string | null;
@@ -28,19 +28,19 @@ interface PurchaseState {
   loadPurchaseInvoices: () => Promise<void>;
   loadPurchaseInvoice: (id: string) => Promise<void>;
   addPurchaseInvoice: (params: CreatePurchaseInvoiceParams) => Promise<void>;
-  
+
   // Actions - Returns
   loadPurchaseReturns: () => Promise<void>;
   loadPurchaseReturn: (id: string) => Promise<void>;
   addPurchaseReturn: (params: CreatePurchaseReturnParams) => Promise<void>;
-  
+
   // Utils
   clearCurrentInvoice: () => void;
   clearCurrentReturn: () => void;
   clearError: () => void;
 }
 
-export const usePurchaseStore = create<PurchaseState>((set, get) => ({
+export const usePurchaseStore = create<PurchaseState>((set) => ({
   // Initial State
   purchaseInvoices: [],
   currentPurchaseInvoice: null,
@@ -54,42 +54,83 @@ export const usePurchaseStore = create<PurchaseState>((set, get) => ({
   // ==========================================
   loadPurchaseInvoices: async () => {
     set({ isLoading: true, error: null });
+
     try {
       const data = await getPurchaseInvoices();
-      set({ purchaseInvoices: data, isLoading: false });
+
+      set({
+        purchaseInvoices: data,
+        isLoading: false
+      });
     } catch (error) {
-      const msg = error instanceof Error ? error.message : "حدث خطأ غير معروف أثناء جلب قائمة فواتير المشتريات.";
-      set({ error: msg, isLoading: false });
+      const msg =
+        error instanceof Error
+          ? error.message
+          : 'حدث خطأ غير معروف أثناء جلب قائمة فواتير المشتريات.';
+
+      set({
+        error: msg,
+        isLoading: false
+      });
     }
   },
 
   loadPurchaseInvoice: async (id: string) => {
     set({ isLoading: true, error: null });
+
     try {
       const data = await getPurchaseInvoiceById(id);
+
       if (!data) {
-        throw new Error("فاتورة المشتريات المطلوبة غير موجودة.");
+        throw new Error('فاتورة المشتريات المطلوبة غير موجودة.');
       }
-      set({ currentPurchaseInvoice: data, isLoading: false });
+
+      set({
+        currentPurchaseInvoice: data,
+        isLoading: false
+      });
     } catch (error) {
-      const msg = error instanceof Error ? error.message : "حدث خطأ أثناء جلب بيانات فاتورة المشتريات.";
-      set({ error: msg, isLoading: false });
+      const msg =
+        error instanceof Error
+          ? error.message
+          : 'حدث خطأ أثناء جلب بيانات فاتورة المشتريات.';
+
+      set({
+        error: msg,
+        isLoading: false
+      });
     }
   },
 
   addPurchaseInvoice: async (params: CreatePurchaseInvoiceParams) => {
-    set({ isLoading: true, error: null });
+    set({
+      isLoading: true,
+      error: null
+    });
+
     try {
       await createPurchaseInvoice(params);
-      
-      // إعادة تحميل القائمة لتتزامن مع التحديثات
-      await get().loadPurchaseInvoices();
-      
-      set({ isLoading: false });
+
+      // إعادة تحميل القائمة مباشرة دون استدعاء Action آخر
+      // حتى لا يحدث تداخل في حالة isLoading.
+      const data = await getPurchaseInvoices();
+
+      set({
+        purchaseInvoices: data,
+        isLoading: false
+      });
     } catch (error) {
-      const msg = error instanceof Error ? error.message : "حدث خطأ أثناء إنشاء فاتورة المشتريات.";
-      set({ error: msg, isLoading: false });
-      throw new Error(msg); 
+      const msg =
+        error instanceof Error
+          ? error.message
+          : 'حدث خطأ أثناء إنشاء فاتورة المشتريات.';
+
+      set({
+        error: msg,
+        isLoading: false
+      });
+
+      throw new Error(msg);
     }
   },
 
@@ -97,52 +138,94 @@ export const usePurchaseStore = create<PurchaseState>((set, get) => ({
   // Returns Actions
   // ==========================================
   loadPurchaseReturns: async () => {
-    set({ isLoading: true, error: null });
+    set({
+      isLoading: true,
+      error: null
+    });
+
     try {
       const data = await getPurchaseReturns();
-      set({ purchaseReturns: data, isLoading: false });
+
+      set({
+        purchaseReturns: data,
+        isLoading: false
+      });
     } catch (error) {
-      const msg = error instanceof Error ? error.message : "حدث خطأ غير معروف أثناء جلب قائمة مرتجعات المشتريات.";
-      set({ error: msg, isLoading: false });
+      const msg =
+        error instanceof Error
+          ? error.message
+          : 'حدث خطأ غير معروف أثناء جلب قائمة مرتجعات المشتريات.';
+
+      set({
+        error: msg,
+        isLoading: false
+      });
     }
   },
 
   loadPurchaseReturn: async (id: string) => {
-    set({ isLoading: true, error: null });
+    set({
+      isLoading: true,
+      error: null
+    });
+
     try {
       const data = await getPurchaseReturnById(id);
+
       if (!data) {
-        throw new Error("مرتجع المشتريات المطلوب غير موجود.");
+        throw new Error('مرتجع المشتريات المطلوب غير موجود.');
       }
-      set({ currentPurchaseReturn: data, isLoading: false });
+
+      set({
+        currentPurchaseReturn: data,
+        isLoading: false
+      });
     } catch (error) {
-      const msg = error instanceof Error ? error.message : "حدث خطأ أثناء جلب بيانات مرتجع المشتريات.";
-      set({ error: msg, isLoading: false });
+      const msg =
+        error instanceof Error
+          ? error.message
+          : 'حدث خطأ أثناء جلب بيانات مرتجع المشتريات.';
+
+      set({
+        error: msg,
+        isLoading: false
+      });
     }
   },
 
   addPurchaseReturn: async (params: CreatePurchaseReturnParams) => {
-    set({ isLoading: true, error: null });
+    set({
+      isLoading: true,
+      error: null
+    });
+
     try {
       await createPurchaseReturn(params);
-      
-      // 1. إعادة تحميل قائمة المرتجعات
-      await get().loadPurchaseReturns();
-      
-      // 2. إعادة تحميل قائمة الفواتير (لأن حالة الفاتورة الأصلية وكمياتها المرتجعة قد تغيرت)
-      await get().loadPurchaseInvoices();
-      
-      // 3. إذا كان المستخدم يعرض حالياً الفاتورة الأصلية التي تم الإرجاع منها، أعد تحميلها لتحديث البيانات فوراً
-      const currentInvoice = get().currentPurchaseInvoice;
-      if (currentInvoice && currentInvoice.id === params.originalInvoiceId) {
-        await get().loadPurchaseInvoice(params.originalInvoiceId);
-      }
-      
-      set({ isLoading: false });
+
+      // إعادة تحميل قائمة المرتجعات
+      const returnsData = await getPurchaseReturns();
+
+      // إعادة تحميل قائمة الفواتير للحفاظ على تزامن البيانات
+      // دون افتراض وجود originalInvoiceId.
+      const invoicesData = await getPurchaseInvoices();
+
+      set({
+        purchaseReturns: returnsData,
+        purchaseInvoices: invoicesData,
+        isLoading: false
+      });
     } catch (error) {
-      const msg = error instanceof Error ? error.message : "حدث خطأ أثناء إنشاء مرتجع المشتريات.";
-      set({ error: msg, isLoading: false });
-      throw new Error(msg); 
+      const msg =
+        error instanceof Error
+          ? error.message
+          : 'حدث خطأ أثناء إنشاء مرتجع المشتريات.';
+
+      set({
+        error: msg,
+        isLoading: false
+      });
+
+      throw new Error(msg);
     }
   },
 
@@ -150,14 +233,30 @@ export const usePurchaseStore = create<PurchaseState>((set, get) => ({
   // Utilities
   // ==========================================
   clearCurrentInvoice: () => {
-    set({ currentPurchaseInvoice: null });
+    set({
+      currentPurchaseInvoice: null
+    });
   },
 
   clearCurrentReturn: () => {
-    set({ currentPurchaseReturn: null });
+    set({
+      currentPurchaseReturn: null
+    });
   },
 
   clearError: () => {
-    set({ error: null });
+    set({
+      error: null
+    });
   }
 }));
+
+ما تم تغييره فقط
+
+- أزلت استخدام "get()" والـ nested actions داخل "addPurchaseInvoice" و"addPurchaseReturn" حتى لا تتداخل حالات "isLoading".
+- أزلت الاعتماد على "params.originalInvoiceId" من "addPurchaseReturn"؛ المرتجع عندنا مستقل عن اختيار فاتورة أصلية.
+- بعد إنشاء المرتجع يتم تحديث قائمة المرتجعات + قائمة الفواتير مباشرة.
+
+لم نغير أي API أو Model أو Service.
+
+الملف التالي بعد اعتماد هذا: "NewPurchaseInvoice.tsx".
