@@ -4,12 +4,15 @@ import {
   getPurchaseInvoices,
   getPurchaseInvoiceById,
   createPurchaseInvoice,
-  CreatePurchaseInvoiceParams,
+  CreatePurchaseInvoiceParams
+} from '../services/purchaseService';
+
+import {
   getPurchaseReturns,
   getPurchaseReturnById,
   createPurchaseReturn,
   CreatePurchaseReturnParams
-} from '../services/purchaseService';
+} from '../services/purchaseReturnService';
 
 interface PurchaseState {
   // Data - Invoices
