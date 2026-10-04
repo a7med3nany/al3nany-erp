@@ -10,12 +10,14 @@ import {
   RotateCcw,
   Building2,
   Warehouse as WarehouseIcon,
+  Trash2,
 } from 'lucide-react';
 import { usePurchaseStore } from '../store/purchaseStore';
 import { useSupplierStore } from '../store/supplierStore';
 import { useProductStore } from '../store/productStore';
 import { useWarehouseStore } from '../store/warehouseStore';
 import { useCashboxStore } from '../store/cashboxStore';
+import { useInventoryStore } from '../store/inventoryStore';
 import { auth } from '../config/firebase';
 
 interface ReturnItemState {
@@ -26,52 +28,37 @@ interface ReturnItemState {
 const PurchaseReturn: React.FC = () => {
   const navigate = useNavigate();
 
-  const { purchaseInvoices, addPurchaseReturn, isLoading: isSaving } =
-    usePurchaseStore();
-
+  const { purchaseInvoices, addPurchaseReturn, isLoading: isSaving, loadPurchaseInvoices } = usePurchaseStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
-
   const { products, fetchProducts } = useProductStore();
-
   const { warehouses, fetchWarehouses } = useWarehouseStore();
-
   const { cashboxes, fetchCashboxes } = useCashboxStore();
+  const { items: inventoryItems, loadWarehouseStock } = useInventoryStore();
 
   const [supplierId, setSupplierId] = useState('');
   const [warehouseId, setWarehouseId] = useState('');
-
   const [supplierSearch, setSupplierSearch] = useState('');
   const [productSearch, setProductSearch] = useState('');
-
-  const [returnItems, setReturnItems] = useState<
-    Record<string, ReturnItemState>
-  >({});
-
-  const [refundMethod, setRefundMethod] = useState<
-    'cash' | 'supplier_credit'
-  >('supplier_credit');
-
+  const [returnItems, setReturnItems] = useState<Record<string, ReturnItemState>>({});
+  const [refundMethod, setRefundMethod] = useState<'cash' | 'supplier_credit'>('supplier_credit');
   const [cashboxId, setCashboxId] = useState('');
-
-  const [returnSessionId, setReturnSessionId] = useState<string>(() =>
-    crypto.randomUUID()
-  );
-
+  const [returnSessionId, setReturnSessionId] = useState<string>(() => crypto.randomUUID());
+  
   const [formError, setFormError] = useState('');
   const [isSuccess, setIsSuccess] = useState(false);
 
   useEffect(() => {
+    loadPurchaseInvoices();
     loadSuppliers();
     fetchProducts();
     fetchWarehouses();
     fetchCashboxes();
-  }, [loadSuppliers, fetchProducts, fetchWarehouses, fetchCashboxes]);
+  }, [loadPurchaseInvoices, loadSuppliers, fetchProducts, fetchWarehouses, fetchCashboxes]);
 
   const supplierPurchaseData = useMemo(() => {
     if (!supplierId) {
       return [];
     }
-
     return purchaseInvoices.filter(
       (invoice) =>
         invoice.supplierId === supplierId &&
@@ -81,13 +68,11 @@ const PurchaseReturn: React.FC = () => {
 
   const supplierProductIds = useMemo(() => {
     const ids = new Set<string>();
-
     supplierPurchaseData.forEach((invoice) => {
       invoice.items.forEach((item) => {
         ids.add(item.productId);
       });
     });
-
     return ids;
   }, [supplierPurchaseData]);
 
@@ -104,12 +89,10 @@ const PurchaseReturn: React.FC = () => {
     }
 
     const query = productSearch.trim().toLowerCase();
-
     return activeProducts.filter((product) => {
       const name = product.name.toLowerCase();
       const sku = product.sku?.toLowerCase() || '';
       const barcode = product.barcode?.toLowerCase() || '';
-
       return (
         name.includes(query) ||
         sku.includes(query) ||
@@ -130,15 +113,12 @@ const PurchaseReturn: React.FC = () => {
     if (!supplierSearch.trim()) {
       return suppliers.filter((supplier) => supplier.isActive);
     }
-
     const query = supplierSearch.trim().toLowerCase();
-
     return suppliers
       .filter((supplier) => supplier.isActive)
       .filter((supplier) => {
         const name = supplier.name.toLowerCase();
         const phone = supplier.phone?.toLowerCase() || '';
-
         return name.includes(query) || phone.includes(query);
       })
       .slice(0, 10);
@@ -154,7 +134,6 @@ const PurchaseReturn: React.FC = () => {
     const total = selectedItems.reduce((sum, [, item]) => {
       return sum + item.quantity * item.returnPrice;
     }, 0);
-
     return Number(total.toFixed(4));
   }, [selectedItems]);
 
@@ -177,6 +156,9 @@ const PurchaseReturn: React.FC = () => {
     setRefundMethod('supplier_credit');
     setFormError('');
     setReturnSessionId(crypto.randomUUID());
+    if (id) {
+      loadWarehouseStock(id);
+    }
   };
 
   const handleProductAdd = (productId: string) => {
@@ -186,20 +168,23 @@ const PurchaseReturn: React.FC = () => {
     }
 
     const product = products.find((item) => item.id === productId);
-
     if (!product) {
       setFormError('المنتج المحدد غير موجود.');
       return;
     }
 
+    const invItem = inventoryItems.find(
+      (i) => i.productId === productId && i.warehouseId === warehouseId
+    );
+    const defaultReturnPrice = invItem?.wac ?? 0;
+
     setReturnItems((prev) => ({
       ...prev,
       [productId]: prev[productId] || {
         quantity: 1,
-        returnPrice: product.averageCost ?? product.lastPurchaseCost ?? 0,
+        returnPrice: defaultReturnPrice,
       },
     }));
-
     setProductSearch('');
     setFormError('');
   };
@@ -217,7 +202,6 @@ const PurchaseReturn: React.FC = () => {
     }
 
     const quantity = Number(value);
-
     if (!Number.isFinite(quantity) || quantity < 0) {
       return;
     }
@@ -244,7 +228,6 @@ const PurchaseReturn: React.FC = () => {
     }
 
     const returnPrice = Number(value);
-
     if (!Number.isFinite(returnPrice) || returnPrice < 0) {
       return;
     }
@@ -299,14 +282,12 @@ const PurchaseReturn: React.FC = () => {
         setFormError('يجب أن تكون كمية المرتجع أكبر من صفر.');
         return false;
       }
-
       if (item.returnPrice < 0) {
-        setFormError('سعر المرتجع لا يمكن أن يكون سالبًا.');
+        setFormError('سعر المرتجع لا يمكن أن يكون سالباً.');
         return false;
       }
 
       const product = products.find((product) => product.id === productId);
-
       if (!product) {
         setFormError('يوجد منتج غير موجود ضمن المرتجع.');
         return false;
@@ -362,7 +343,6 @@ const PurchaseReturn: React.FC = () => {
       });
 
       setIsSuccess(true);
-
       setTimeout(() => {
         navigate('/purchases');
       }, 2000);
@@ -382,9 +362,7 @@ const PurchaseReturn: React.FC = () => {
           <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center">
             <Save className="w-8 h-8 text-green-600" />
           </div>
-
           <h2 className="text-2xl font-bold">تم حفظ المرتجع بنجاح</h2>
-
           <p>
             تم تسجيل المرتجع وتحديث المخزون وحساب المورد بنجاح.
           </p>
@@ -403,13 +381,11 @@ const PurchaseReturn: React.FC = () => {
           >
             <ArrowRight className="w-5 h-5 text-gray-600" />
           </button>
-
           <div>
             <h1 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
               <RotateCcw className="w-6 h-6 text-orange-600" />
               إنشاء مرتجع مشتريات
             </h1>
-
             <p className="text-sm text-gray-500">
               إرجاع بضاعة للمورد وتسوية الحسابات الخاصة بها.
             </p>
@@ -426,7 +402,7 @@ const PurchaseReturn: React.FC = () => {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-6">
-          <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 space-y-5">
+          <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 space-y-4">
             <h2 className="text-lg font-semibold text-gray-800 flex items-center gap-2 border-b pb-3">
               <Building2 className="w-5 h-5 text-blue-600" />
               بيانات المرتجع
@@ -436,9 +412,8 @@ const PurchaseReturn: React.FC = () => {
               <label className="text-sm font-medium text-gray-700">
                 المورد
               </label>
-
               {selectedSupplier ? (
-                <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 flex items-center justify-between">
+                <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 flex justify-between items-center">
                   <div>
                     <p className="text-xs text-gray-500 mb-1">
                       المورد المحدد
@@ -447,7 +422,6 @@ const PurchaseReturn: React.FC = () => {
                       {selectedSupplier.name}
                     </p>
                   </div>
-
                   <button
                     type="button"
                     onClick={() => {
@@ -468,13 +442,12 @@ const PurchaseReturn: React.FC = () => {
               ) : (
                 <div className="relative">
                   <Search className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5" />
-
                   <input
                     type="text"
                     value={supplierSearch}
                     onChange={(e) => setSupplierSearch(e.target.value)}
                     placeholder="ابحث باسم المورد أو رقم الهاتف..."
-                    className="w-full pr-10 pl-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white"
+                    className="w-full pr-10 pl-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all"
                   />
 
                   {supplierSearch && (
@@ -485,12 +458,11 @@ const PurchaseReturn: React.FC = () => {
                             key={supplier.id}
                             type="button"
                             onClick={() => handleSupplierSelect(supplier.id)}
-                            className="w-full text-right px-4 py-3 hover:bg-blue-50 border-b border-gray-100 last:border-0"
+                            className="w-full text-right px-4 py-3 hover:bg-blue-50 flex flex-col border-b border-gray-100 last:border-0"
                           >
-                            <span className="font-semibold text-gray-800 block">
+                            <span className="font-semibold text-gray-800">
                               {supplier.name}
                             </span>
-
                             {supplier.phone && (
                               <span className="text-sm text-gray-500">
                                 {supplier.phone}
@@ -514,15 +486,13 @@ const PurchaseReturn: React.FC = () => {
                 <WarehouseIcon className="w-4 h-4 text-blue-600" />
                 المخزن
               </label>
-
               <select
                 value={warehouseId}
                 onChange={(e) => handleWarehouseChange(e.target.value)}
                 disabled={!supplierId}
-                className="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                className="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all appearance-none"
               >
                 <option value="">اختر المخزن...</option>
-
                 {warehouses
                   .filter((warehouse) => warehouse.isActive)
                   .map((warehouse) => (
@@ -535,7 +505,7 @@ const PurchaseReturn: React.FC = () => {
           </div>
 
           {supplierId && warehouseId && (
-            <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 space-y-5">
+            <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 space-y-4">
               <h2 className="text-lg font-semibold text-gray-800 flex items-center gap-2 border-b pb-3">
                 <Box className="w-5 h-5 text-blue-600" />
                 إضافة الأصناف المرتجعة
@@ -543,13 +513,12 @@ const PurchaseReturn: React.FC = () => {
 
               <div className="relative">
                 <Search className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5" />
-
                 <input
                   type="text"
                   value={productSearch}
                   onChange={(e) => setProductSearch(e.target.value)}
                   placeholder="ابحث عن صنف تم شراؤه من هذا المورد..."
-                  className="w-full pr-10 pl-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white"
+                  className="w-full pr-10 pl-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all"
                 />
 
                 {productSearch && (
@@ -557,25 +526,24 @@ const PurchaseReturn: React.FC = () => {
                     {supplierProducts.length > 0 ? (
                       supplierProducts.slice(0, 10).map((product) => {
                         const alreadyAdded = !!returnItems[product.id];
-
                         return (
                           <button
                             key={product.id}
                             type="button"
                             disabled={alreadyAdded}
                             onClick={() => handleProductAdd(product.id)}
-                            className="w-full text-right px-4 py-3 hover:bg-blue-50 disabled:bg-gray-50 disabled:text-gray-400 border-b border-gray-100 last:border-0"
+                            className="w-full text-right px-4 py-3 hover:bg-blue-50 flex items-center justify-between border-b border-gray-100 last:border-0 disabled:opacity-60 disabled:cursor-not-allowed"
                           >
-                            <span className="font-semibold block">
-                              {product.name}
-                            </span>
-
-                            <span className="text-xs text-gray-500">
-                              {product.sku || product.barcode || 'بدون كود'}
-                            </span>
-
+                            <div>
+                              <span className="font-semibold block">
+                                {product.name}
+                              </span>
+                              <span className="text-xs text-gray-500">
+                                {product.sku || product.barcode || 'بدون كود'}
+                              </span>
+                            </div>
                             {alreadyAdded && (
-                              <span className="text-xs text-orange-600 block mt-1">
+                              <span className="text-xs text-orange-600 font-medium">
                                 مضاف بالفعل
                               </span>
                             )}
@@ -592,7 +560,7 @@ const PurchaseReturn: React.FC = () => {
               </div>
 
               {selectedItems.length === 0 ? (
-                <div className="text-center py-12 text-gray-400 border border-dashed border-gray-300 rounded-xl">
+                <div className="text-center py-12 text-gray-400 border border-dashed border-gray-200 rounded-xl bg-gray-50/50">
                   <Box className="w-12 h-12 mx-auto mb-3 opacity-50" />
                   <p className="text-sm">
                     ابحث عن صنف وأضفه إلى المرتجع.
@@ -606,52 +574,42 @@ const PurchaseReturn: React.FC = () => {
                         <th className="px-4 py-3 font-semibold">
                           الصنف
                         </th>
-
-                        <th className="px-4 py-3 font-semibold text-center">
+                        <th className="px-4 py-3 font-semibold text-center w-32">
                           الكمية
                         </th>
-
-                        <th className="px-4 py-3 font-semibold text-center">
+                        <th className="px-4 py-3 font-semibold text-center w-36">
                           سعر المرتجع
                         </th>
-
                         <th className="px-4 py-3 font-semibold text-center">
                           الإجمالي
                         </th>
-
                         <th className="px-4 py-3 w-16"></th>
                       </tr>
                     </thead>
-
                     <tbody className="divide-y divide-gray-100">
                       {selectedItems.map(([productId, item]) => {
                         const product = products.find(
                           (currentProduct) =>
                             currentProduct.id === productId
                         );
-
                         if (!product) {
                           return null;
                         }
-
                         const lineTotal = Number(
                           (item.quantity * item.returnPrice).toFixed(4)
                         );
-
                         return (
-                          <tr key={productId} className="hover:bg-gray-50">
+                          <tr key={productId} className="hover:bg-gray-50/80 transition-colors">
                             <td className="px-4 py-4">
                               <div className="font-semibold text-gray-800">
                                 {product.name}
                               </div>
-
                               <div className="text-xs text-gray-500 mt-1">
                                 {product.sku ||
                                   product.barcode ||
                                   'بدون كود'}
                               </div>
                             </td>
-
                             <td className="px-4 py-4">
                               <input
                                 type="number"
@@ -664,10 +622,9 @@ const PurchaseReturn: React.FC = () => {
                                     e.target.value
                                   )
                                 }
-                                className="w-28 mx-auto block px-2 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-center font-bold"
+                                className="w-28 mx-auto block px-2 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-center text-sm font-semibold"
                               />
                             </td>
-
                             <td className="px-4 py-4">
                               <input
                                 type="number"
@@ -680,21 +637,22 @@ const PurchaseReturn: React.FC = () => {
                                     e.target.value
                                   )
                                 }
-                                className="w-32 mx-auto block px-2 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-center font-bold text-orange-700"
+                                className="w-32 mx-auto block px-2 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-center text-sm font-semibold text-blue-700"
                               />
                             </td>
-
-                            <td className="px-4 py-4 text-center font-bold text-gray-800">
+                            <td className="px-4 py-4 text-center font-bold text-gray-900">
                               {lineTotal.toLocaleString()} ج.م
                             </td>
-
                             <td className="px-4 py-4 text-center">
                               <button
                                 type="button"
-                                onClick={() => removeProduct(productId)}
-                                className="text-red-500 hover:text-red-700 text-sm font-medium"
+                                onClick={() =>
+                                  removeProduct(productId)
+                                }
+                                className="text-red-500 hover:text-red-700 transition-colors p-1.5 bg-red-50 rounded-lg hover:bg-red-100"
+                                title="حذف"
                               >
-                                حذف
+                                <Trash2 className="w-4 h-4" />
                               </button>
                             </td>
                           </tr>
@@ -705,9 +663,11 @@ const PurchaseReturn: React.FC = () => {
                 </div>
               )}
 
-              <div className="bg-blue-50 border border-blue-100 rounded-xl p-3 text-sm text-blue-800">
-                سيتم التحقق عند الحفظ من أن الصنف تم شراؤه فعليًا من المورد
-                المحدد، وأن الكمية المطلوب إرجاعها متاحة في المخزن.
+              <div className="bg-blue-50 border border-blue-100 rounded-xl p-3 mt-4 text-sm text-blue-800 flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <p>
+                  يتم التحقق عند الحفظ من أن الصنف تم شراؤه فعلياً من المورد المحدد، وأن الكمية المطلوب إرجاعها متاحة في المخزن. السعر الافتراضي محسوب بناءً على متوسط التكلفة (WAC) للمخزن المحدد.
+                </p>
               </div>
             </div>
           )}
@@ -733,11 +693,9 @@ const PurchaseReturn: React.FC = () => {
                   <span className="text-sm text-gray-500 block mb-1">
                     إجمالي قيمة المرتجع
                   </span>
-
                   <span className="text-2xl font-black text-gray-900">
                     {totalReturnAmount.toLocaleString()} ج.م
                   </span>
-
                   <p className="text-xs text-gray-400 mt-1">
                     سعر التسوية يحدده المستخدم لكل صنف.
                   </p>
@@ -747,9 +705,8 @@ const PurchaseReturn: React.FC = () => {
                   <label className="text-sm font-medium text-gray-700">
                     طريقة التسوية
                   </label>
-
                   <div className="grid grid-cols-1 gap-2">
-                    <label className="flex items-center gap-3 border border-gray-200 rounded-xl p-3 cursor-pointer hover:bg-gray-50">
+                    <label className={`flex items-center gap-3 border rounded-xl p-3 cursor-pointer transition-all ${refundMethod === 'supplier_credit' ? 'bg-blue-50 border-blue-200' : 'border-gray-200 hover:bg-gray-50'}`}>
                       <input
                         type="radio"
                         name="refundMethod"
@@ -759,36 +716,32 @@ const PurchaseReturn: React.FC = () => {
                           setRefundMethod('supplier_credit');
                           setCashboxId('');
                         }}
-                        className="w-4 h-4"
+                        className="w-4 h-4 text-blue-600 focus:ring-blue-500"
                       />
-
                       <div>
                         <p className="font-semibold text-gray-800">
                           رصيد دائن لدى المورد
                         </p>
-
-                        <p className="text-xs text-gray-500">
+                        <p className="text-xs text-gray-500 mt-0.5">
                           يتم تخفيض مديونية المورد أو إنشاء رصيد دائن لنا.
                         </p>
                       </div>
                     </label>
 
-                    <label className="flex items-center gap-3 border border-gray-200 rounded-xl p-3 cursor-pointer hover:bg-gray-50">
+                    <label className={`flex items-center gap-3 border rounded-xl p-3 cursor-pointer transition-all ${refundMethod === 'cash' ? 'bg-blue-50 border-blue-200' : 'border-gray-200 hover:bg-gray-50'}`}>
                       <input
                         type="radio"
                         name="refundMethod"
                         value="cash"
                         checked={refundMethod === 'cash'}
                         onChange={() => setRefundMethod('cash')}
-                        className="w-4 h-4"
+                        className="w-4 h-4 text-blue-600 focus:ring-blue-500"
                       />
-
                       <div>
                         <p className="font-semibold text-gray-800">
                           استرداد نقدي كامل
                         </p>
-
-                        <p className="text-xs text-gray-500">
+                        <p className="text-xs text-gray-500 mt-0.5">
                           المورد يعيد قيمة المرتجع نقدًا إلى الخزينة.
                         </p>
                       </div>
@@ -797,47 +750,41 @@ const PurchaseReturn: React.FC = () => {
                 </div>
 
                 {refundMethod === 'cash' && (
-                  <div className="space-y-2">
+                  <div className="space-y-2 animate-in fade-in slide-in-from-top-2">
                     <label className="text-sm font-medium text-gray-700">
                       الخزينة المستلمة للمبلغ{' '}
                       <span className="text-red-500">*</span>
                     </label>
-
                     <select
                       value={cashboxId}
                       onChange={(e) => setCashboxId(e.target.value)}
-                      className="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-full px-3 py-2.5 bg-white border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 appearance-none"
                     >
                       <option value="">اختر الخزينة...</option>
-
                       {cashboxes
                         ?.filter((cashbox) => cashbox.isActive)
                         .map((cashbox) => (
                           <option key={cashbox.id} value={cashbox.id}>
-                            {cashbox.name} (
-                            {cashbox.balance.toLocaleString()} ج.م)
+                            {cashbox.name} ({cashbox.balance.toLocaleString()} ج.م)
                           </option>
                         ))}
                     </select>
-
-                    <p className="text-xs text-gray-500">
+                    <p className="text-xs text-gray-500 mt-1">
                       سيتم تسجيل المبلغ كحركة دخول إلى الخزينة.
                     </p>
                   </div>
                 )}
 
-                <div className="bg-orange-50 p-4 rounded-xl border border-orange-100">
+                <div className="bg-orange-50 p-4 rounded-xl border border-orange-100 flex flex-col gap-2">
                   <div className="flex justify-between items-center">
                     <span className="text-sm font-medium text-orange-800">
-                      قيمة التسوية
+                      قيمة التسوية:
                     </span>
-
                     <span className="font-bold text-orange-700 text-lg">
                       {totalReturnAmount.toLocaleString()} ج.م
                     </span>
                   </div>
-
-                  <p className="text-xs text-orange-700 mt-2">
+                  <p className="text-xs text-orange-700">
                     سيتم تسجيل حركة مورد من نوع خروج بقيمة المرتجع.
                   </p>
                 </div>
@@ -856,7 +803,6 @@ const PurchaseReturn: React.FC = () => {
           >
             إلغاء
           </button>
-
           <button
             onClick={handleSubmit}
             disabled={
@@ -872,8 +818,7 @@ const PurchaseReturn: React.FC = () => {
               <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
             ) : (
               <>
-                <RotateCcw className="w-5 h-5" />
-                تأكيد المرتجع
+                <RotateCcw className="w-5 h-5" /> تأكيد المرتجع
               </>
             )}
           </button>
