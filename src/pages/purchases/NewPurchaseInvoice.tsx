@@ -1808,6 +1808,4 @@ const NewPurchaseInvoice: React.FC = () => {
   );
 };
 
-export default NewPurchaseInvoice;
-
-مهم قبل الاستبدال: أنا تعمدت هنا عدم تعديل أي Store أو Service آخر. بعد استبدال الملف، اعمل TypeScript/build check فقط. لو ظهر أي خطأ، ابعته لي كما هو قبل ما ننتقل للملف التالي؛ خصوصًا لأن شكل "CreateSupplierParams" و"ProductInput" الفعليين لم ترسل ملفي الـService الخاصين بهما.
+export default NewPurchaseInvoice; 
