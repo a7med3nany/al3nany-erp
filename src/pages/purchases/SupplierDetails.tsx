@@ -1,7 +1,3 @@
-**ملخص التعديلات:**
-تمت إضافة زر "تسجيل دفعة" في شريط الإجراءات أعلى صفحة تفاصيل المورد (بجانب أزرار تعديل وتفعيل/تعطيل المورد). الزر يقوم بالتوجيه حصرياً إلى مسار suppliers/:id/payment باستخدام useNavigate، دون إضافة أي منطق مالي أو تعديل أي ملفات أخرى للحفاظ على فصل المهام (Separation of Concerns).
-إليك الملف الكامل والنهائي **src/pages/purchases/SupplierDetails.tsx**:
-```typescript
 import React, { useEffect, useState, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { 
