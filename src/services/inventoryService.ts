@@ -14,11 +14,16 @@ import {
   InventoryItem, 
   InventoryMovement, 
   InventoryMovementType, 
-  InventoryReferenceType 
+  InventoryReferenceType,
+  InventoryLayerTracker,
+  InventoryLayer
 } from '../types';
 
 const INVENTORY_COLLECTION = 'inventory_items';
 const MOVEMENTS_COLLECTION = 'inventory_movements';
+const LAYER_TRACKERS_COLLECTION = 'inventory_layers';
+
+const TOLERANCE = 0.0001;
 
 // ==========================================
 // 1. Backward Compatibility Interfaces (Old API)
@@ -29,6 +34,9 @@ export interface StockItemInput {
   quantity: number;
   unitCost?: number;
   sourceLineId?: string;
+  supplierId?: string;
+  purchaseInvoiceId?: string;
+  purchaseLineId?: string;
 }
 
 export interface StockOperationParams {
@@ -69,6 +77,9 @@ export interface ProcessStockInParams {
   sourceLineId?: string;
   description?: string;
   createdBy: string;
+  supplierId?: string;
+  purchaseInvoiceId?: string;
+  purchaseLineId?: string;
 }
 
 export interface ProcessStockOutParams {
@@ -80,6 +91,7 @@ export interface ProcessStockOutParams {
   sourceLineId?: string;
   description?: string;
   createdBy: string;
+  supplierId?: string; // Required for Purchase Return (LIFO Filter)
 }
 
 export interface ProcessWarehouseTransferParams {
@@ -100,6 +112,8 @@ export interface PreparedStockIn {
   itemRef: any;
   itemData?: Omit<InventoryItem, 'id'> | Partial<InventoryItem>;
   isNewItem?: boolean;
+  trackerRef: any;
+  trackerData?: InventoryLayerTracker;
 }
 
 export interface PreparedStockOut {
@@ -108,6 +122,8 @@ export interface PreparedStockOut {
   movementData?: Omit<InventoryMovement, 'id'>;
   itemRef: any;
   itemUpdateData?: Partial<InventoryItem>;
+  trackerRef: any;
+  trackerData?: InventoryLayerTracker;
 }
 
 export interface PreparedWarehouseTransfer {
@@ -121,10 +137,14 @@ export interface PreparedWarehouseTransfer {
   destItemRef: any;
   destItemData?: Omit<InventoryItem, 'id'> | Partial<InventoryItem>;
   isNewDestItem?: boolean;
+  sourceTrackerRef: any;
+  sourceTrackerData?: InventoryLayerTracker;
+  destTrackerRef: any;
+  destTrackerData?: InventoryLayerTracker;
 }
 
 // ==========================================
-// 3. Validation Helpers
+// 3. Validation & Helpers
 // ==========================================
 
 const validateQuantity = (qty: number) => {
@@ -135,6 +155,43 @@ const validateQuantity = (qty: number) => {
 
 const generateMovementId = (refType: string, refId: string, type: string, lineId?: string) => {
   return `mov_${refType}_${refId}_${lineId || 'main'}_${type}`;
+};
+
+const getLayerTrackerId = (warehouseId: string, productId: string) => {
+  return `${warehouseId}_${productId}`;
+};
+
+export const toDateSafe = (value: any): Date => {
+  if (!value) return new Date();
+  if (value instanceof Timestamp) return value.toDate();
+  if (value instanceof Date) return value;
+  if (typeof value === 'object' && value !== null && 'toDate' in value && typeof value.toDate === 'function') {
+    return value.toDate();
+  }
+  if (typeof value === 'string' || typeof value === 'number') {
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  return new Date();
+};
+
+const getLegacyLayer = (warehouseId: string, productId: string, oldQuantity: number, oldWac: number, createdAtDate: Date): InventoryLayer => ({
+  layerId: `legacy_${warehouseId}_${productId}`,
+  supplierId: 'UNKNOWN',
+  purchaseInvoiceId: 'LEGACY',
+  purchaseLineId: 'LEGACY',
+  unitCost: oldWac,
+  originalQuantity: oldQuantity,
+  remainingQuantity: oldQuantity,
+  createdAt: createdAtDate,
+  isLegacy: true,
+});
+
+const validateLayerConsistency = (activeLayers: InventoryLayer[], inventoryQuantity: number) => {
+  const layersQuantity = activeLayers.reduce((sum, layer) => sum + layer.remainingQuantity, 0);
+  if (Math.abs(layersQuantity - inventoryQuantity) > TOLERANCE) {
+    throw new Error(`تعارض في بيانات المخزون والطبقات. يرجى مراجعة المخزون قبل تنفيذ العملية. (مجموع الطبقات: ${layersQuantity}، الرصيد الفعلي: ${inventoryQuantity})`);
+  }
 };
 
 // ==========================================
@@ -150,13 +207,16 @@ export const prepareStockInInTransaction = async (
   if (params.unitCost < 0) throw new Error("التكلفة لا يمكن أن تكون سالبة.");
 
   const generatedMovementId = generateMovementId(params.referenceType, params.referenceId, 'in', params.sourceLineId);
+  const layerTrackerId = getLayerTrackerId(params.warehouseId, params.productId);
   
   const movementRef = doc(db, MOVEMENTS_COLLECTION, generatedMovementId);
   const itemRef = doc(db, INVENTORY_COLLECTION, `${params.warehouseId}_${params.productId}`);
+  const trackerRef = doc(db, LAYER_TRACKERS_COLLECTION, layerTrackerId);
 
-  // Sequential Reads
+  // Read Phase: Sequential Reads inside Transaction
   const movementSnap = await transaction.get(movementRef);
   const itemSnap = await transaction.get(itemRef);
+  const trackerSnap = await transaction.get(trackerRef);
 
   // Idempotency Check
   if (movementSnap.exists()) {
@@ -169,7 +229,7 @@ export const prepareStockInInTransaction = async (
       existingMove.referenceId === params.referenceId &&
       existingMove.sourceLineId === params.sourceLineId
     ) {
-      return { isIdempotent: true, movementRef, itemRef };
+      return { isIdempotent: true, movementRef, itemRef, trackerRef };
     } else {
       throw new Error(`معرف الحركة مستخدم بالفعل لمعاملة إدخال مخزني أخرى بتفاصيل مختلفة (${generatedMovementId})`);
     }
@@ -188,7 +248,7 @@ export const prepareStockInInTransaction = async (
 
   const newQuantity = Number((oldQuantity + params.quantity).toFixed(4));
   
-  // WAC Calculation
+  // WAC Calculation (Retains existing solid logic)
   let newWac = params.unitCost;
   if (newQuantity > 0) {
     const totalOldValue = oldQuantity * oldWac;
@@ -197,6 +257,48 @@ export const prepareStockInInTransaction = async (
   }
   
   const newInventoryValue = Number((newQuantity * newWac).toFixed(4));
+
+  // Layer Tracker Handling
+  let trackerData: InventoryLayerTracker;
+  if (trackerSnap.exists()) {
+    trackerData = trackerSnap.data() as InventoryLayerTracker;
+  } else {
+    trackerData = {
+      id: layerTrackerId,
+      warehouseId: params.warehouseId,
+      productId: params.productId,
+      activeLayers: [],
+      updatedAt: now as unknown as Date
+    };
+  }
+
+  // Inject Legacy Layer if needed before adding new stock
+  if (!isNewItem && oldQuantity > 0 && trackerData.activeLayers.length === 0) {
+    const itemLastUpdated = itemSnap.data()?.lastUpdatedAt ? toDateSafe(itemSnap.data()?.lastUpdatedAt) : now.toDate();
+    trackerData.activeLayers.push(getLegacyLayer(params.warehouseId, params.productId, oldQuantity, oldWac, itemLastUpdated));
+  }
+
+  // Create deterministic Layer ID specific to Purchase or fallback
+  let newLayerId = `layer_${params.referenceType}_${params.referenceId}_${params.sourceLineId || 'main'}`;
+  if (params.referenceType === 'purchase_invoice' && params.purchaseInvoiceId && params.purchaseLineId) {
+    newLayerId = `layer_purchase_${params.purchaseInvoiceId}_${params.purchaseLineId}`;
+  }
+  
+  const existingLayerIndex = trackerData.activeLayers.findIndex(l => l.layerId === newLayerId);
+  if (existingLayerIndex === -1) {
+    trackerData.activeLayers.push({
+      layerId: newLayerId,
+      supplierId: params.supplierId || 'UNKNOWN',
+      purchaseInvoiceId: params.purchaseInvoiceId || params.referenceId,
+      purchaseLineId: params.purchaseLineId || params.sourceLineId || 'main',
+      unitCost: params.unitCost, // Historical Cost / Net Unit Cost
+      originalQuantity: params.quantity,
+      remainingQuantity: params.quantity,
+      createdAt: now as unknown as Date
+    });
+  }
+
+  trackerData.updatedAt = now as unknown as Date;
 
   const movementData: Omit<InventoryMovement, 'id'> = {
     productId: params.productId,
@@ -233,13 +335,18 @@ export const prepareStockInInTransaction = async (
         lastUpdatedAt: now as unknown as Date
       };
 
+  // Validate Layer Consistency before returning
+  validateLayerConsistency(trackerData.activeLayers, newQuantity);
+
   return {
     isIdempotent: false,
     movementRef,
     movementData,
     itemRef,
     itemData,
-    isNewItem
+    isNewItem,
+    trackerRef,
+    trackerData
   };
 };
 
@@ -253,8 +360,9 @@ export const commitStockInInTransaction = (
 ): void => {
   if (prepared.isIdempotent) return;
 
-  if (prepared.movementData && prepared.itemData) {
+  if (prepared.movementData && prepared.itemData && prepared.trackerData) {
     transaction.set(prepared.movementRef, prepared.movementData);
+    transaction.set(prepared.trackerRef, prepared.trackerData);
     
     if (prepared.isNewItem) {
       transaction.set(prepared.itemRef, prepared.itemData);
@@ -276,13 +384,16 @@ export const prepareStockOutInTransaction = async (
   validateQuantity(params.quantity);
 
   const generatedMovementId = generateMovementId(params.referenceType, params.referenceId, 'out', params.sourceLineId);
+  const layerTrackerId = getLayerTrackerId(params.warehouseId, params.productId);
   
   const movementRef = doc(db, MOVEMENTS_COLLECTION, generatedMovementId);
   const itemRef = doc(db, INVENTORY_COLLECTION, `${params.warehouseId}_${params.productId}`);
+  const trackerRef = doc(db, LAYER_TRACKERS_COLLECTION, layerTrackerId);
 
-  // Sequential Reads
+  // Read Phase: Sequential Reads
   const movementSnap = await transaction.get(movementRef);
   const itemSnap = await transaction.get(itemRef);
+  const trackerSnap = await transaction.get(trackerRef);
 
   // Idempotency Check
   if (movementSnap.exists()) {
@@ -295,7 +406,7 @@ export const prepareStockOutInTransaction = async (
       existingMove.referenceId === params.referenceId &&
       existingMove.sourceLineId === params.sourceLineId
     ) {
-      return { isIdempotent: true, movementRef, itemRef };
+      return { isIdempotent: true, movementRef, itemRef, trackerRef };
     } else {
       throw new Error(`معرف الحركة مستخدم بالفعل لمعاملة إخراج مخزني أخرى بتفاصيل مختلفة (${generatedMovementId})`);
     }
@@ -313,9 +424,84 @@ export const prepareStockOutInTransaction = async (
     throw new Error(`الرصيد المتاح لا يكفي. المتاح: ${currentQuantity}, المطلوب: ${params.quantity}`);
   }
 
+  const now = Timestamp.now();
+
+  // Layer Tracker Handling
+  let trackerData: InventoryLayerTracker;
+  if (trackerSnap.exists()) {
+    trackerData = trackerSnap.data() as InventoryLayerTracker;
+  } else {
+    trackerData = {
+      id: layerTrackerId,
+      warehouseId: params.warehouseId,
+      productId: params.productId,
+      activeLayers: [],
+      updatedAt: now as unknown as Date
+    };
+  }
+
+  if (currentQuantity > 0 && trackerData.activeLayers.length === 0) {
+    const itemLastUpdated = currentItem.lastUpdatedAt ? toDateSafe(currentItem.lastUpdatedAt) : now.toDate();
+    trackerData.activeLayers.push(getLegacyLayer(params.warehouseId, params.productId, currentQuantity, currentWac, itemLastUpdated));
+  }
+
+  let remainingToDeduct = params.quantity;
+
+  // Layer Consumption Logic (LIFO vs FIFO)
+  if (params.referenceType === 'purchase_return') {
+    // Supplier-filtered LIFO
+    if (!params.supplierId) {
+      throw new Error("معرف المورد مطلوب لإجراء مرتجع المشتريات.");
+    }
+    
+    const validLayers = trackerData.activeLayers.filter(l => l.supplierId === params.supplierId && !l.isLegacy);
+    const totalAvailableFromSupplier = validLayers.reduce((sum, l) => sum + l.remainingQuantity, 0);
+
+    if (totalAvailableFromSupplier < params.quantity) {
+      throw new Error("لا توجد كمية متاحة لإرجاع هذا المنتج من المورد المحدد في هذا المخزن.");
+    }
+
+    // Sort valid layers by creation date descending (LIFO: Newest first)
+    validLayers.sort((a, b) => toDateSafe(b.createdAt).getTime() - toDateSafe(a.createdAt).getTime());
+
+    for (const layer of validLayers) {
+      if (remainingToDeduct <= 0) break;
+      const targetLayer = trackerData.activeLayers.find(l => l.layerId === layer.layerId)!;
+      
+      const deduct = Math.min(targetLayer.remainingQuantity, remainingToDeduct);
+      targetLayer.remainingQuantity = Number((targetLayer.remainingQuantity - deduct).toFixed(4));
+      remainingToDeduct = Number((remainingToDeduct - deduct).toFixed(4));
+    }
+  } else {
+    // Sales / General Stock Out (FIFO)
+    // Sort all layers ascending by creation date (FIFO: Oldest first)
+    const sortedLayers = [...trackerData.activeLayers].sort((a, b) => toDateSafe(a.createdAt).getTime() - toDateSafe(b.createdAt).getTime());
+
+    for (const layer of sortedLayers) {
+      if (remainingToDeduct <= 0) break;
+      const targetLayer = trackerData.activeLayers.find(l => l.layerId === layer.layerId)!;
+      if (targetLayer.remainingQuantity <= 0) continue;
+
+      const deduct = Math.min(targetLayer.remainingQuantity, remainingToDeduct);
+      targetLayer.remainingQuantity = Number((targetLayer.remainingQuantity - deduct).toFixed(4));
+      remainingToDeduct = Number((remainingToDeduct - deduct).toFixed(4));
+    }
+
+    // Fallback if data is historically out of sync but item quantity is allowed to be deducted
+    if (remainingToDeduct > TOLERANCE) {
+      throw new Error(`تعارض في بيانات الطبقات: الكمية التفصيلية المتبقية غير كافية للسحب.`);
+    }
+  }
+
+  // Cleanup exhausted layers
+  trackerData.activeLayers = trackerData.activeLayers.filter(l => l.remainingQuantity > TOLERANCE);
+  trackerData.updatedAt = now as unknown as Date;
+
   const newQuantity = Number((currentQuantity - params.quantity).toFixed(4));
   const newInventoryValue = Number((newQuantity * currentWac).toFixed(4));
-  const now = Timestamp.now();
+
+  // Validate Layer Consistency before returning
+  validateLayerConsistency(trackerData.activeLayers, newQuantity);
 
   const movementData: Omit<InventoryMovement, 'id'> = {
     productId: params.productId,
@@ -325,7 +511,7 @@ export const prepareStockOutInTransaction = async (
     quantityIn: 0,
     quantityOut: params.quantity,
     balanceAfter: newQuantity,
-    unitCost: currentWac, // السحب يتم بمتوسط التكلفة الحالي ولا يغيره
+    unitCost: currentWac, // Inventory value is reduced by WAC
     averageCostAfter: currentWac,
     referenceType: params.referenceType,
     referenceId: params.referenceId,
@@ -347,7 +533,9 @@ export const prepareStockOutInTransaction = async (
     movementRef,
     movementData,
     itemRef,
-    itemUpdateData
+    itemUpdateData,
+    trackerRef,
+    trackerData
   };
 };
 
@@ -361,8 +549,9 @@ export const commitStockOutInTransaction = (
 ): void => {
   if (prepared.isIdempotent) return;
 
-  if (prepared.movementData && prepared.itemUpdateData) {
+  if (prepared.movementData && prepared.itemUpdateData && prepared.trackerData) {
     transaction.set(prepared.movementRef, prepared.movementData);
+    transaction.set(prepared.trackerRef, prepared.trackerData);
     transaction.update(prepared.itemRef, prepared.itemUpdateData);
   }
 };
@@ -389,11 +578,19 @@ export const prepareWarehouseTransferInTransaction = async (
   const sourceItemRef = doc(db, INVENTORY_COLLECTION, `${params.sourceWarehouseId}_${params.productId}`);
   const destItemRef = doc(db, INVENTORY_COLLECTION, `${params.destWarehouseId}_${params.productId}`);
 
-  // Sequential Reads
+  const sourceTrackerId = getLayerTrackerId(params.sourceWarehouseId, params.productId);
+  const destTrackerId = getLayerTrackerId(params.destWarehouseId, params.productId);
+
+  const sourceTrackerRef = doc(db, LAYER_TRACKERS_COLLECTION, sourceTrackerId);
+  const destTrackerRef = doc(db, LAYER_TRACKERS_COLLECTION, destTrackerId);
+
+  // Read Phase: Sequential Reads
   const outMovementSnap = await transaction.get(outMovementRef);
   const inMovementSnap = await transaction.get(inMovementRef);
   const sourceItemSnap = await transaction.get(sourceItemRef);
   const destItemSnap = await transaction.get(destItemRef);
+  const sourceTrackerSnap = await transaction.get(sourceTrackerRef);
+  const destTrackerSnap = await transaction.get(destTrackerRef);
 
   const outExists = outMovementSnap.exists();
   const inExists = inMovementSnap.exists();
@@ -407,7 +604,6 @@ export const prepareWarehouseTransferInTransaction = async (
       outMove.referenceId === params.transferId &&
       outMove.productId === params.productId &&
       outMove.warehouseId === params.sourceWarehouseId &&
-      outMove.sourceLineId === params.sourceLineId &&
       outMove.quantityOut === params.quantity &&
       outMove.type === 'transfer_out';
 
@@ -415,17 +611,12 @@ export const prepareWarehouseTransferInTransaction = async (
       inMove.referenceId === params.transferId &&
       inMove.productId === params.productId &&
       inMove.warehouseId === params.destWarehouseId &&
-      inMove.sourceLineId === params.sourceLineId &&
       inMove.quantityIn === params.quantity &&
       inMove.type === 'transfer_in';
 
     if (isOutMatch && isInMatch) {
       return { 
-        isIdempotent: true, 
-        outMovementRef, 
-        inMovementRef, 
-        sourceItemRef, 
-        destItemRef 
+        isIdempotent: true, outMovementRef, inMovementRef, sourceItemRef, destItemRef, sourceTrackerRef, destTrackerRef 
       };
     } else {
       throw new Error(`رقم التحويل (${params.transferId}) مستخدم لعملية نقل أخرى بتفاصيل مختلفة.`);
@@ -442,9 +633,6 @@ export const prepareWarehouseTransferInTransaction = async (
 
   const sourceItem = sourceItemSnap.data() as InventoryItem;
   const sourceQuantity = Number.isFinite(sourceItem.quantity) ? sourceItem.quantity : 0;
-  
-  // تكلفة الوحدة المنقولة إلى المخزن المستلم هي WAC الحالي للمخزن المصدر، 
-  // ثم يتم استخدام هذه التكلفة لحساب WAC الجديد في المخزن المستلم.
   const sourceWac = Number.isFinite(sourceItem.wac) ? sourceItem.wac : 0; 
 
   if (sourceQuantity < params.quantity) {
@@ -455,7 +643,62 @@ export const prepareWarehouseTransferInTransaction = async (
   const newSourceQuantity = Number((sourceQuantity - params.quantity).toFixed(4));
   const newSourceInventoryValue = Number((newSourceQuantity * sourceWac).toFixed(4));
 
-  // Dest item calculations
+  // Initialize Source Tracker
+  let sourceTrackerData: InventoryLayerTracker;
+  if (sourceTrackerSnap.exists()) {
+    sourceTrackerData = sourceTrackerSnap.data() as InventoryLayerTracker;
+  } else {
+    sourceTrackerData = {
+      id: sourceTrackerId,
+      warehouseId: params.sourceWarehouseId,
+      productId: params.productId,
+      activeLayers: [],
+      updatedAt: now as unknown as Date
+    };
+  }
+
+  if (sourceQuantity > 0 && sourceTrackerData.activeLayers.length === 0) {
+    const itemLastUpdated = sourceItem.lastUpdatedAt ? toDateSafe(sourceItem.lastUpdatedAt) : now.toDate();
+    sourceTrackerData.activeLayers.push(getLegacyLayer(params.sourceWarehouseId, params.productId, sourceQuantity, sourceWac, itemLastUpdated));
+  }
+
+  // Consume from Source (FIFO)
+  let remainingToTransfer = params.quantity;
+  const sortedSourceLayers = [...sourceTrackerData.activeLayers].sort((a, b) => toDateSafe(a.createdAt).getTime() - toDateSafe(b.createdAt).getTime());
+  const derivedLayers: InventoryLayer[] = [];
+
+  for (const layer of sortedSourceLayers) {
+    if (remainingToTransfer <= 0) break;
+    const targetLayer = sourceTrackerData.activeLayers.find(l => l.layerId === layer.layerId)!;
+    if (targetLayer.remainingQuantity <= 0) continue;
+
+    const deduct = Math.min(targetLayer.remainingQuantity, remainingToTransfer);
+    targetLayer.remainingQuantity = Number((targetLayer.remainingQuantity - deduct).toFixed(4));
+    remainingToTransfer = Number((remainingToTransfer - deduct).toFixed(4));
+
+    // Create Derived Layer for Destination
+    derivedLayers.push({
+      layerId: `trans_${params.transferId}_${targetLayer.layerId}`,
+      supplierId: targetLayer.supplierId,
+      purchaseInvoiceId: targetLayer.purchaseInvoiceId,
+      purchaseLineId: targetLayer.purchaseLineId,
+      unitCost: targetLayer.unitCost, // Inherit historical cost
+      originalQuantity: deduct,
+      remainingQuantity: deduct,
+      createdAt: now.toDate(), // Date it entered destination warehouse
+      isLegacy: targetLayer.isLegacy,
+      parentLayerId: targetLayer.layerId // Lineage tracking
+    });
+  }
+
+  if (remainingToTransfer > TOLERANCE) {
+    throw new Error(`تعارض في بيانات الطبقات: الكمية التفصيلية في المخزن المصدر غير كافية للنقل.`);
+  }
+
+  sourceTrackerData.activeLayers = sourceTrackerData.activeLayers.filter(l => l.remainingQuantity > TOLERANCE);
+  sourceTrackerData.updatedAt = now as unknown as Date;
+
+  // Initialize Dest Tracker
   const isNewDestItem = !destItemSnap.exists();
   let destQuantity = 0;
   let destWac = 0;
@@ -466,9 +709,38 @@ export const prepareWarehouseTransferInTransaction = async (
     destWac = Number.isFinite(destItem.wac) ? destItem.wac : 0;
   }
 
+  let destTrackerData: InventoryLayerTracker;
+  if (destTrackerSnap.exists()) {
+    destTrackerData = destTrackerSnap.data() as InventoryLayerTracker;
+  } else {
+    destTrackerData = {
+      id: destTrackerId,
+      warehouseId: params.destWarehouseId,
+      productId: params.productId,
+      activeLayers: [],
+      updatedAt: now as unknown as Date
+    };
+  }
+
+  if (!isNewDestItem && destQuantity > 0 && destTrackerData.activeLayers.length === 0) {
+    const destItemRaw = destItemSnap.data() as InventoryItem;
+    const destLastUpdated = destItemRaw.lastUpdatedAt ? toDateSafe(destItemRaw.lastUpdatedAt) : now.toDate();
+    destTrackerData.activeLayers.push(getLegacyLayer(params.destWarehouseId, params.productId, destQuantity, destWac, destLastUpdated));
+  }
+
+  // Add derived layers to Dest Tracker with Idempotency check via findIndex
+  for (const dLayer of derivedLayers) {
+    const existingIndex = destTrackerData.activeLayers.findIndex(l => l.layerId === dLayer.layerId);
+    if (existingIndex === -1) {
+      destTrackerData.activeLayers.push(dLayer);
+    }
+  }
+  
+  destTrackerData.updatedAt = now as unknown as Date;
+
   const newDestQuantity = Number((destQuantity + params.quantity).toFixed(4));
   
-  // Dest WAC Calculation
+  // Dest WAC Calculation (Retained logic)
   let newDestWac = sourceWac;
   if (newDestQuantity > 0) {
     const totalOldValue = destQuantity * destWac;
@@ -477,6 +749,10 @@ export const prepareWarehouseTransferInTransaction = async (
   }
 
   const newDestInventoryValue = Number((newDestQuantity * newDestWac).toFixed(4));
+
+  // Validate Layer Consistency before returning
+  validateLayerConsistency(sourceTrackerData.activeLayers, newSourceQuantity);
+  validateLayerConsistency(destTrackerData.activeLayers, newDestQuantity);
 
   const outMovementData: Omit<InventoryMovement, 'id'> = {
     productId: params.productId,
@@ -550,7 +826,11 @@ export const prepareWarehouseTransferInTransaction = async (
     sourceItemUpdateData,
     destItemRef,
     destItemData,
-    isNewDestItem
+    isNewDestItem,
+    sourceTrackerRef,
+    sourceTrackerData,
+    destTrackerRef,
+    destTrackerData
   };
 };
 
@@ -564,10 +844,13 @@ export const commitWarehouseTransferInTransaction = (
 ): void => {
   if (prepared.isIdempotent) return;
 
-  if (prepared.outMovementData && prepared.inMovementData && prepared.sourceItemUpdateData && prepared.destItemData) {
+  if (prepared.outMovementData && prepared.inMovementData && prepared.sourceItemUpdateData && prepared.destItemData && prepared.sourceTrackerData && prepared.destTrackerData) {
     transaction.set(prepared.outMovementRef, prepared.outMovementData);
     transaction.set(prepared.inMovementRef, prepared.inMovementData);
     
+    transaction.set(prepared.sourceTrackerRef, prepared.sourceTrackerData);
+    transaction.set(prepared.destTrackerRef, prepared.destTrackerData);
+
     transaction.update(prepared.sourceItemRef, prepared.sourceItemUpdateData);
     
     if (prepared.isNewDestItem) {
@@ -579,7 +862,7 @@ export const commitWarehouseTransferInTransaction = (
 };
 
 // ==========================================
-// 10. Backward Compatibility Orchestrators (Supports Both APIs)
+// 10. Backward Compatibility Orchestrators
 // ==========================================
 
 export const processStockInInTransaction = async (
@@ -587,7 +870,6 @@ export const processStockInInTransaction = async (
   params: ProcessStockInParams | StockOperationParams
 ): Promise<void> => {
   if ('items' in params) {
-    // Array API (Phase 1 & 2): Collect all reads first, then write all.
     const prepares: PreparedStockIn[] = [];
     for (const item of params.items) {
       prepares.push(await prepareStockInInTransaction(transaction, {
@@ -599,14 +881,16 @@ export const processStockInInTransaction = async (
         referenceId: params.referenceId,
         sourceLineId: item.sourceLineId,
         description: params.description,
-        createdBy: params.createdBy
+        createdBy: params.createdBy,
+        supplierId: item.supplierId,
+        purchaseInvoiceId: item.purchaseInvoiceId,
+        purchaseLineId: item.purchaseLineId
       }));
     }
     for (const prepared of prepares) {
       commitStockInInTransaction(transaction, prepared);
     }
   } else {
-    // Single Item API (Phase 3)
     const prepared = await prepareStockInInTransaction(transaction, params);
     commitStockInInTransaction(transaction, prepared);
   }
@@ -627,7 +911,8 @@ export const processStockOutInTransaction = async (
         referenceId: params.referenceId,
         sourceLineId: item.sourceLineId,
         description: params.description,
-        createdBy: params.createdBy
+        createdBy: params.createdBy,
+        supplierId: item.supplierId
       }));
     }
     for (const prepared of prepares) {
